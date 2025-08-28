@@ -22,19 +22,11 @@ android {
     }
   }
 
-  // 统一 Java 版本到 17
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
     targetCompatibility JavaVersion.VERSION_17
   }
-
-  // 统一 Kotlin JVM 目标到 17
-  kotlinOptions {
-    jvmTarget = '17'
-  }
 }
-
-// 保险：即使上面的 kotlinOptions 因环境未识别，也强制所有 Kotlin 任务使用 17
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
   kotlinOptions { jvmTarget = '17' }
 }
@@ -43,7 +35,8 @@ dependencies {
   implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
   implementation "androidx.core:core-ktx:1.13.1"
   implementation "androidx.appcompat:appcompat:1.7.0"
-  // Shizuku
+
+  // ★ Shizuku 依赖（关键）
   implementation "dev.rikka.shizuku:api:13.1.5"
   implementation "dev.rikka.shizuku:provider:13.1.5"
 }

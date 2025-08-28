@@ -1,25 +1,29 @@
 package com.example.navswitcher
+
 import rikka.shizuku.Shizuku
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 object ShizukuShell {
-  fun exec(cmd: String, timeoutMs: Long = 3000): Pair<Int,String> {
-    if (!Shizuku.pingBinder()) return -1 to "Shizuku not running"
-    return try {
-      val p = Shizuku.newProcess(arrayOf("sh","-c",cmd), null, null)
-      val out = StringBuilder()
-      val r1 = BufferedReader(InputStreamReader(p.inputStream))
-      val r2 = BufferedReader(InputStreamReader(p.errorStream))
-      val t1 = Thread { r1.forEachLine { out.append(it).append('\n') } }
-      val t2 = Thread { r2.forEachLine { out.append(it).append('\n') } }
-      t1.start(); t2.start()
-      val start = System.currentTimeMillis()
-      while (p.isAlive && System.currentTimeMillis()-start < timeoutMs) Thread.sleep(20)
-      if (p.isAlive) p.destroy()
-      t1.join(150); t2.join(150)
-      val code = runCatching { p.exitValue() }.getOrElse { -2 }
-      code to out.toString()
-    } catch (e: Throwable) { -3 to (e.message ?: "error") }
+  // 异步绑定并执行；执行完成通过回调返回 exit code
+  fun exec(cmd: String, onDone: (Int) -> Unit) {
+    if (!Shizuku.pingBinder()) { onDone(-3); return }
+    if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+      onDone(-2); return
+    }
+    ShellUserService.bind { svc ->
+      if (svc == null) { onDone(-4); return@bind }
+      try {
+        val code = svc.runCmd(cmd)
+        onDone(code)
+      } catch (_: Throwable) {
+        onDone(-1)
+      }
+    }
+  }
+
+  // 简单的串行动作：先 A 后 B
+  fun execTwo(a: String, b: String, onDone: (Pair<Int,Int>) -> Unit) {
+    exec(a) { ca ->
+      exec(b) { cb -> onDone(ca to cb) }
+    }
   }
 }

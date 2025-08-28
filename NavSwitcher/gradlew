@@ -1,8 +1,0 @@
-#!/usr/bin/env sh
-# Minimal bootstrap: if wrapper not generated, try to use gradle from PATH to generate it.
-if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-  echo "No wrapper properties found. Attempting to run 'gradle wrapper'..."
-  gradle wrapper || true
-fi
-DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$DIR/gradlew" "$@"

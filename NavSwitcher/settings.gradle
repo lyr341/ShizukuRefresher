@@ -3,7 +3,7 @@ pluginManagement {
     google()
     mavenCentral()
     gradlePluginPortal()
-    maven { url "https://maven.rikka.dev" }   // ★ 新增：Shizuku 官方仓库
+    maven { url "https://maven.rikka.dev" }   // ← Shizuku 官方仓库
   }
 }
 dependencyResolutionManagement {
@@ -11,7 +11,7 @@ dependencyResolutionManagement {
   repositories {
     google()
     mavenCentral()
-    maven { url "https://maven.rikka.dev" }   // ★ 新增
+    maven { url "https://maven.rikka.dev" }   // ← 这里也加
   }
 }
 rootProject.name = "NavSwitcher"

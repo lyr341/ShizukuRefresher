@@ -81,19 +81,20 @@ class FloatService : Service() {
   }
 
 private fun doOnce() {
-  // 1) 导航模式切换 0 -> 2
-  ShizukuShell.execTwo("settings put secure navigation_mode 0",
-                       "settings put secure navigation_mode 2") { (c1, c2) ->
+  // 1) 导航 0 -> 2
+  ShizukuShell.execTwo(this, "settings put secure navigation_mode 0",
+                            "settings put secure navigation_mode 2") { (c1, c2) ->
     if (c1 == 0 && c2 == 0) {
       Toast.makeText(this, "导航切换完成", Toast.LENGTH_SHORT).show()
     } else {
-      // 2) 兜底：字体缩放 1.01 -> 1.00
-      ShizukuShell.execTwo("settings put secure font_scale 1.01",
-                           "settings put secure font_scale 1.00") { _ ->
+      // 2) 兜底：字体抖动
+      ShizukuShell.execTwo(this, "settings put secure font_scale 1.01",
+                                "settings put secure font_scale 1.00") {
         Toast.makeText(this, "已用字体轻抖作为兜底", Toast.LENGTH_SHORT).show()
       }
     }
   }
 }
+
 
 }

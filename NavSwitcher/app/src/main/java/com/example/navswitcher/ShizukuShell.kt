@@ -1,5 +1,5 @@
 package com.example.navswitcher
-import dev.rikka.shizuku.Shizuku
+import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
 

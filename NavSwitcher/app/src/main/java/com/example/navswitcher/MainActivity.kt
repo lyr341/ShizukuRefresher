@@ -7,7 +7,7 @@ import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import dev.rikka.shizuku.Shizuku
+import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
   private val REQ = 10086

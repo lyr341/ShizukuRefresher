@@ -6,6 +6,7 @@ plugins {
 android {
   namespace 'com.example.navswitcher'
   compileSdk 34
+
   defaultConfig {
     applicationId "com.example.navswitcher"
     minSdk 24
@@ -13,25 +14,29 @@ android {
     versionCode 1
     versionName "1.0"
   }
+
   buildTypes {
     release {
       minifyEnabled false
       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
     }
   }
-    // Java 源/目标统一到 17
+
+  // 统一 Java 版本到 17
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
     targetCompatibility JavaVersion.VERSION_17
   }
 
-  // Kotlin 目标 JVM 17
+  // 统一 Kotlin JVM 目标到 17
   kotlinOptions {
     jvmTarget = '17'
   }
+}
 
-  // 使用 JDK 17 工具链（AGP 7+ 支持）
-  compileOptions.kotlinJvmTargetValidationMode = org.gradle.api.tasks.compile.validation.KotlinJvmTargetValidationMode.WARNING
+// 保险：即使上面的 kotlinOptions 因环境未识别，也强制所有 Kotlin 任务使用 17
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+  kotlinOptions { jvmTarget = '17' }
 }
 
 dependencies {

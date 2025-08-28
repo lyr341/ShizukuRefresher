@@ -22,7 +22,7 @@ jobs:
       - name: Build Debug APK with Gradle 8.5
         uses: gradle/gradle-build-action@v2
         with:
-          gradle-version: 8.5
+          gradle-version: 8.7
           arguments: assembleDebug
           build-root-directory: NavSwitcher   # ← 关键：工程所在子目录
 

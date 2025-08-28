@@ -15,21 +15,19 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 安装需要的 Android SDK 组件（平台 + build-tools + platform-tools）
       - name: Install Android SDK components
         run: |
           yes | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
-      # 用官方 Gradle Action 直接指定版本跑构建（不依赖仓库中的 wrapper）
       - name: Build Debug APK with Gradle 8.5
         uses: gradle/gradle-build-action@v2
         with:
           gradle-version: 8.5
           arguments: assembleDebug
+          build-root-directory: NavSwitcher   # ← 关键：工程所在子目录
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-
+          path: NavSwitcher/app/build/outputs/apk/debug/app-debug.apk  # ← 路径也要带子目录

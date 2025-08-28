@@ -19,6 +19,19 @@ android {
       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
     }
   }
+    // Java 源/目标统一到 17
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  // Kotlin 目标 JVM 17
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+
+  // 使用 JDK 17 工具链（AGP 7+ 支持）
+  compileOptions.kotlinJvmTargetValidationMode = org.gradle.api.tasks.compile.validation.KotlinJvmTargetValidationMode.WARNING
 }
 
 dependencies {

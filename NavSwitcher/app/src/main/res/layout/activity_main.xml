@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:orientation="vertical" android:padding="20dp"
+  android:layout_width="match_parent" android:layout_height="match_parent">
+
+  <TextView
+      android:id="@+id/tv"
+      android:text="步骤：\n1. 先让 Shizuku 运行\n2. 点下方按钮申请权限\n3. 开启悬浮球，点一下即可切导航（失败会用字体兜底）"
+      android:textSize="15sp"
+      android:layout_width="match_parent" android:layout_height="wrap_content"/>
+
+  <Button
+      android:id="@+id/btnPerm"
+      android:text="申请 Shizuku 权限"
+      android:layout_marginTop="16dp"
+      android:layout_width="match_parent" android:layout_height="wrap_content"/>
+
+  <Button
+      android:id="@+id/btnFloat"
+      android:text="开启悬浮球"
+      android:layout_marginTop="12dp"
+      android:layout_width="match_parent" android:layout_height="wrap_content"/>
+</LinearLayout>

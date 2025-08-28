@@ -80,19 +80,20 @@ class FloatService : Service() {
     Toast.makeText(this, "悬浮球已创建：点一下执行切换", Toast.LENGTH_SHORT).show()
   }
 
-  private fun doOnce() {
-    // 1) 导航模式切换 0 -> 2
-    val (c1, _) = ShizukuShell.exec("settings put secure navigation_mode 0")
-    Thread.sleep(180)
-    val (c2, _) = ShizukuShell.exec("settings put secure navigation_mode 2")
+private fun doOnce() {
+  // 1) 导航模式切换 0 -> 2
+  ShizukuShell.execTwo("settings put secure navigation_mode 0",
+                       "settings put secure navigation_mode 2") { (c1, c2) ->
     if (c1 == 0 && c2 == 0) {
       Toast.makeText(this, "导航切换完成", Toast.LENGTH_SHORT).show()
-      return
+    } else {
+      // 2) 兜底：字体缩放 1.01 -> 1.00
+      ShizukuShell.execTwo("settings put secure font_scale 1.01",
+                           "settings put secure font_scale 1.00") { _ ->
+        Toast.makeText(this, "已用字体轻抖作为兜底", Toast.LENGTH_SHORT).show()
+      }
     }
-    // 2) 兜底：字体缩放 1.01 -> 1.00
-    ShizukuShell.exec("settings put secure font_scale 1.01")
-    Thread.sleep(160)
-    ShizukuShell.exec("settings put secure font_scale 1.00")
-    Toast.makeText(this, "已用字体轻抖作为兜底", Toast.LENGTH_SHORT).show()
   }
+}
+
 }

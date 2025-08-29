@@ -1,6 +1,6 @@
 // FloatService.kt 关键片段
 package com.example.navswitcher
-
+import android.content.pm.PackageManager
 import android.app.*
 import android.content.*
 import android.graphics.PixelFormat
@@ -106,11 +106,10 @@ class FloatService : Service() {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
             return
         }
-        if (rikka.shizuku.Shizuku.checkSelfPermission()
-            != packageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "Shizuku 未授权本应用", Toast.LENGTH_SHORT).show()
-            return
-        }
+    if (rikka.shizuku.Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+        Toast.makeText(this, "Shizuku 未授权本应用", Toast.LENGTH_SHORT).show()
+        return
+    }
 
         // 2) 执行一条最简单命令，拿到退出码，给出可见提示
         ShizukuShell.execTwo(this, listOf("whoami")) { code ->

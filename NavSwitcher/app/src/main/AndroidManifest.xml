@@ -1,34 +1,45 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 现有权限保留 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
-  <application
-      android:label="@string/app_name"
-      android:theme="@style/Theme.AppCompat.Light.NoActionBar"
-      android:supportsRtl="true">
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+        android:supportsRtl="true">
 
-  <provider
-      android:name="rikka.shizuku.ShizukuProvider"
-      android:authorities="${applicationId}.shizuku"
-      android:exported="true" />
+        <!-- Shizuku Provider：已修成 exported=true，OK -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:exported="true" />
 
+        <!-- ★ 新增：声明用户服务（被 Shizuku 绑定） -->
+        <service
+            android:name=".ShellUserService"
+            android:exported="false"
+            android:stopWithTask="false" />
+            <!-- 不要写 android:process，Shizuku 会用我们在代码里
+                 UserServiceArgs.processNameSuffix("sh") 派生进程 -->
 
-  <service
-      android:name=".FloatService"
-      android:exported="false"
-      android:foregroundServiceType="dataSync" />
+        <!-- 悬浮球前台服务 -->
+        <service
+            android:name=".FloatService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
 
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
 
-    <activity
-        android:name=".MainActivity"
-        android:exported="true">
-      <intent-filter>
-        <action android:name="android.intent.action.MAIN"/>
-        <category android:name="android.intent.category.LAUNCHER"/>
-      </intent-filter>
-    </activity>
-  </application>
+    </application>
 </manifest>

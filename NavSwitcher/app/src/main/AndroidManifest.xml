@@ -9,10 +9,11 @@
       android:theme="@style/Theme.AppCompat.Light.NoActionBar"
       android:supportsRtl="true">
 
-    <provider
-        android:name="rikka.shizuku.ShizukuProvider"
-        android:authorities="${applicationId}.shizuku"
-        android:exported="false" />
+  <provider
+      android:name="rikka.shizuku.ShizukuProvider"
+      android:authorities="${applicationId}.shizuku"
+      android:exported="true" />
+
 
     <service
         android:name=".FloatService"

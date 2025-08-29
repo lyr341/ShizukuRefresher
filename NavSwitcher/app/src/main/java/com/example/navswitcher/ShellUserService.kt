@@ -1,5 +1,5 @@
 package com.example.navswitcher
-
+import com.example.navswitcher.BuildConfig
 import android.app.Service
 import android.content.ComponentName
 import android.content.Context

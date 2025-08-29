@@ -25,26 +25,58 @@ jobs:
             "build-tools;34.0.0" \
             "platform-tools"
 
-      # 可选：看看 Gradle/Java 环境
+      # —— 诊断：看看仓库和子目录里到底有什么 ——
+      - name: List repo root
+        run: |
+          pwd
+          ls -la
+
+      - name: List NavSwitcher contents
+        run: |
+          ls -la NavSwitcher || true
+          ls -la NavSwitcher/gradle || true
+          ls -la NavSwitcher/gradle/wrapper || true
+
+      # 给 gradlew 授权（存在才授权，不存在不报错）
+      - name: Make gradlew executable (if present)
+        run: |
+          if [ -f NavSwitcher/gradlew ]; then
+            chmod +x NavSwitcher/gradlew
+          fi
+
+      # 打印 Gradle 环境：优先用 wrapper；没有就用全局 gradle
       - name: Print Gradle env
-        working-directory: NavSwitcher
-        run: ./gradlew -v
+        run: |
+          set -euxo pipefail
+          if [ -x NavSwitcher/gradlew ]; then
+            (cd NavSwitcher && ./gradlew -v)
+          else
+            echo "::warning::gradlew not found; using global Gradle"
+            gradle -v
+          fi
 
-      # 干净构建，避免缓存旧报错
+      # 干净构建
       - name: Clean
-        working-directory: NavSwitcher
-        run: ./gradlew clean
+        run: |
+          set -euxo pipefail
+          if [ -x NavSwitcher/gradlew ]; then
+            (cd NavSwitcher && ./gradlew clean)
+          else
+            (cd NavSwitcher && gradle clean)
+          fi
 
-      # 关键：把所有输出 tee 到 buildlog.txt；失败也会留下日志
-      - name: Build Debug APK (Gradle 8.7) with full logs
-        working-directory: NavSwitcher
+      # 关键：把日志 tee 到文件，失败也能下载
+      - name: Build Debug APK with full logs
         env:
           TERM: xterm-256color
         run: |
           set -euxo pipefail
-          ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all 2>&1 | tee buildlog.txt
+          if [ -x NavSwitcher/gradlew ]; then
+            (cd NavSwitcher && ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all 2>&1 | tee buildlog.txt)
+          else
+            (cd NavSwitcher && gradle :app:assembleDebug --stacktrace --info --warning-mode all 2>&1 | tee buildlog.txt)
+          fi
 
-      # 无论成功失败都上传日志，Artifacts 里能下载到
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -52,7 +84,6 @@ jobs:
           name: buildlog
           path: NavSwitcher/buildlog.txt
 
-      # 成功时把 APK 也传出来（用通配更稳）
       - name: Upload debug APK
         if: success()
         uses: actions/upload-artifact@v4

@@ -37,8 +37,26 @@ object ShizukuShell {
     }
   }
 
-  // 顺序执行两条命令
-  fun execTwo(context: Context, a: String, b: String, onDone: (Pair<Int,Int>) -> Unit) {
-    exec(context, a) { ca -> exec(context, b) { cb -> onDone(ca to cb) } }
-  }
+    fun execTwo(context: Context, cmds: List<String>, onDone: (Int) -> Unit) {
+        ShellUserService.bind(context) { messenger ->
+            if (messenger == null) {
+                Toast.makeText(context, "绑定 Shizuku 服务失败", Toast.LENGTH_SHORT).show()
+                onDone(-1); return@bind
+            }
+            val msg = Message.obtain(null, 1)
+            msg.data = Bundle().apply { putString("cmd", cmds.joinToString(" && ")) }
+            msg.replyTo = Messenger(object : Handler(Looper.getMainLooper()) {
+                override fun handleMessage(msg: Message) {
+                    val code = msg.data?.getInt("code", -1) ?: -1
+                    onDone(code)
+                }
+            })
+            try {
+                messenger.send(msg)
+            } catch (t: Throwable) {
+                Toast.makeText(context, "发送命令失败: ${t.message}", Toast.LENGTH_SHORT).show()
+                onDone(-1)
+            }
+        }
+    }
 }

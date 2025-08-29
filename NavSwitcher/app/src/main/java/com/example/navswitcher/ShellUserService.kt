@@ -3,6 +3,7 @@ package com.example.navswitcher
 import android.app.Service
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.ServiceConnection
 import android.os.*
 import rikka.shizuku.Shizuku
@@ -20,10 +21,23 @@ class ShellUserService : Service() {
         private const val KEY_CMD = "cmd"
         private const val KEY_CODE = "code"
 
+        // 强引用，避免被 GC 回收导致断连
+        @Volatile private var keepConn: ServiceConnection? = null
+
         // 绑定 user service，拿到一个与之通信的 Messenger
         fun bind(context: Context, onReady: (Messenger?) -> Unit) {
+            // 基本可用性检查
+            if (!Shizuku.pingBinder()) { onReady(null); return }
+            if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                onReady(null); return
+            }
+
             val cn = ComponentName(context.packageName, ShellUserService::class.java.name)
-            val args = Shizuku.UserServiceArgs(cn).daemon(false)
+            val args = Shizuku.UserServiceArgs(cn)
+                .daemon(false)
+                .processNameSuffix("sh")           // ★ 必填：非空
+                .debuggable(BuildConfig.DEBUG)     // 建议
+                .version(1)                        // 建议
 
             val conn = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -33,6 +47,7 @@ class ShellUserService : Service() {
                     onReady(null)
                 }
             }
+            keepConn = conn
             Shizuku.bindUserService(args, conn)
         }
     }
@@ -45,8 +60,7 @@ class ShellUserService : Service() {
                 val code = runShell(cmd)
                 // 回传给客户端
                 val reply = Message.obtain(null, MSG_RUN_CMD)
-                val b = Bundle().apply { putInt(KEY_CODE, code) }
-                reply.data = b
+                reply.data = Bundle().apply { putInt(KEY_CODE, code) }
                 try { msg.replyTo?.send(reply) } catch (_: Throwable) { }
             } else {
                 super.handleMessage(msg)
@@ -55,15 +69,13 @@ class ShellUserService : Service() {
     }
     private val messenger = Messenger(incoming)
 
-    override fun onBind(intent: android.content.Intent?): IBinder = messenger.binder
+    override fun onBind(intent: Intent?): IBinder = messenger.binder
 
-    private fun runShell(cmd: String): Int {
-        return try {
-            val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-            BufferedReader(InputStreamReader(p.inputStream)).use { r -> while (r.readLine()!=null){} }
-            BufferedReader(InputStreamReader(p.errorStream)).use { r -> while (r.readLine()!=null){} }
-            p.waitFor()
-            p.exitValue()
-        } catch (_: Throwable) { -1 }
-    }
+    private fun runShell(cmd: String): Int = try {
+        val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+        BufferedReader(InputStreamReader(p.inputStream)).use { r -> while (r.readLine() != null) {} }
+        BufferedReader(InputStreamReader(p.errorStream)).use { r -> while (r.readLine() != null) {} }
+        p.waitFor()
+        p.exitValue()
+    } catch (_: Throwable) { -1 }
 }

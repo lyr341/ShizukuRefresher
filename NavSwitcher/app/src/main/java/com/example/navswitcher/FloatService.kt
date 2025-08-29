@@ -9,6 +9,11 @@ import android.view.*
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.WindowManager
+import android.widget.ImageView
+import androidx.core.app.NotificationCompat
 
 class FloatService : Service() {
 

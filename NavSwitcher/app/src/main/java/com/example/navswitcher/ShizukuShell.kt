@@ -6,6 +6,9 @@ import android.os.Bundle
 import android.os.Message
 import android.os.Messenger
 import rikka.shizuku.Shizuku
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 
 object ShizukuShell {
 
@@ -36,6 +39,7 @@ object ShizukuShell {
       try { remote.send(m) } catch (_: Throwable) { onDone(-1) }
     }
   }
+
 
     fun execTwo(context: Context, cmds: List<String>, onDone: (Int) -> Unit) {
         ShellUserService.bind(context) { messenger ->

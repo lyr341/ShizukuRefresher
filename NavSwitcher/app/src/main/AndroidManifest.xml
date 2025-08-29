@@ -15,9 +15,11 @@
       android:exported="true" />
 
 
-    <service
-        android:name=".FloatService"
-        android:exported="false" />
+  <service
+      android:name=".FloatService"
+      android:exported="false"
+      android:foregroundServiceType="dataSync" />
+
 
     <activity
         android:name=".MainActivity"

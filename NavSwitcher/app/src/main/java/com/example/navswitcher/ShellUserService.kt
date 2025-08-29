@@ -1,5 +1,4 @@
 package com.example.navswitcher
-import com.example.navswitcher.BuildConfig
 import android.app.Service
 import android.content.ComponentName
 import android.content.Context
@@ -36,7 +35,7 @@ class ShellUserService : Service() {
             val args = Shizuku.UserServiceArgs(cn)
                 .daemon(false)
                 .processNameSuffix("sh")           // ★ 必填：非空
-                .debuggable(BuildConfig.DEBUG)     // 建议
+                .debuggable(true)     // 建议
                 .version(1)                        // 建议
 
             val conn = object : ServiceConnection {

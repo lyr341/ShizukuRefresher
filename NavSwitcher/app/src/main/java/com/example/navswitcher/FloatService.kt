@@ -111,7 +111,7 @@ class FloatService : Service() {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
             return
         }
-    if (rikka.shizuku.Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+    if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
         Toast.makeText(this, "Shizuku 未授权本应用", Toast.LENGTH_SHORT).show()
         return
     }

@@ -18,26 +18,17 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      # 安装 cmdline-tools（runner 默认不一定自带 latest 目录）
-      - name: Install Android SDK cmdline-tools
+      # 一步装好 Android 命令行工具（比手撸 curl+unzip 稳）
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
         run: |
           set -euxo pipefail
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
-          curl -sLo /tmp/cli.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q /tmp/cli.zip -d /tmp/cli
-          mv /tmp/cli/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          yes | sdkmanager --licenses
+          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
-      - name: Install Android SDK components
-        run: |
-          set -euxo pipefail
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            --sdk_root="$ANDROID_HOME" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "platform-tools"
-
-      # 诊断：看看仓库结构
+      # 看看仓库结构（诊断用）
       - name: List repo
         run: |
           pwd
@@ -69,15 +60,18 @@ jobs:
             (cd NavSwitcher && gradle clean)
           fi
 
+      # 关键：无论成功失败，都把完整日志保存出来
       - name: Build Debug APK (full log to file)
+        continue-on-error: true
         run: |
           set -euxo pipefail
           if [ -x NavSwitcher/gradlew ]; then
-            (cd NavSwitcher && ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all | tee buildlog.txt)
+            (cd NavSwitcher && ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all) 2>&1 | tee NavSwitcher/buildlog.txt
           else
-            (cd NavSwitcher && gradle :app:assembleDebug --stacktrace --info --warning-mode all | tee buildlog.txt)
+            (cd NavSwitcher && gradle :app:assembleDebug --stacktrace --info --warning-mode all) 2>&1 | tee NavSwitcher/buildlog.txt
           fi
 
+      # 如果失败，单独抽取 Kotlin 编译错误的 “e: …” 行，方便定位
       - name: Extract Kotlin errors
         if: failure()
         run: |

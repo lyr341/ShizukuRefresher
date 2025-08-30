@@ -126,14 +126,22 @@ class FloatService : Service() {
         }
 
         // 2) 执行测试命令
-        ShizukuShell.execTwo(this, listOf("whoami")) { code ->
-            Toast.makeText(this, "命令退出码：$code", Toast.LENGTH_SHORT).show()
-            // 0 代表执行成功。确认成功后，把这里换成真正的“切换导航”命令组合：
-            // ShizukuShell.execTwo(this, listOf(
-            //     "settings put secure navigation_mode 2",
-            //     "cmd statusbar collapse"
-            // )) { exit -> ... }
+        // 先切到手势，再切回三键（刷新 UI），中间留一点点间隔
+        ShizukuShell.execTwo(
+            this,
+            listOf(
+                "settings put secure navigation_mode 2",
+                "sleep 1",
+                "settings put secure navigation_mode 0"
+            )
+        ) { code ->
+            Toast.makeText(
+                this,
+                if (code == 0) "已触发：切手势→等待→切回三键" else "执行失败，code=$code",
+                Toast.LENGTH_SHORT
+            ).show()
         }
+
     }
 
     override fun onDestroy() {

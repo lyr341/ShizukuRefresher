@@ -5,6 +5,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,12 +21,23 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      # 先装 cmdline-tools，再用 sdkmanager
+      - name: Install Android SDK cmdline-tools
+        run: |
+          set -euxo pipefail
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -sLo /tmp/cli.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/cli.zip -d /tmp/cli
+          mv /tmp/cli/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses
+
       - name: Install Android SDK components
         run: |
-          yes | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} \
-            "platforms;android-34" \
+          set -euxo pipefail
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
             "build-tools;34.0.0" \
-            "platform-tools"
+            "platforms;android-34"
 
       # —— 诊断：看看仓库和子目录里到底有什么 ——
       - name: List repo root
@@ -65,17 +79,25 @@ jobs:
             (cd NavSwitcher && gradle clean)
           fi
 
-      # 关键：把日志 tee 到文件，失败也能下载
-      - name: Build Debug APK with full logs
+      # 关键：把日志 tee 到文件，失败也能分析
+      - name: Build Debug APK (full log to file)
         env:
           TERM: xterm-256color
         run: |
           set -euxo pipefail
           if [ -x NavSwitcher/gradlew ]; then
-            (cd NavSwitcher && ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all 2>&1 | tee buildlog.txt)
+            (cd NavSwitcher && ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all) 2>&1 | tee NavSwitcher/buildlog.txt
           else
-            (cd NavSwitcher && gradle :app:assembleDebug --stacktrace --info --warning-mode all 2>&1 | tee buildlog.txt)
+            (cd NavSwitcher && gradle :app:assembleDebug --stacktrace --info --warning-mode all) 2>&1 | tee NavSwitcher/buildlog.txt
           fi
+
+      # 失败时把 Kotlin “e: …” 错误行单独抠出来，便于你定位
+      - name: Extract Kotlin errors (grep)
+        if: failure()
+        run: |
+          echo "===== Kotlin compiler errors (grep '^e: ') ====="
+          grep -n "^e: " NavSwitcher/buildlog.txt || true
+          echo "===== End of Kotlin errors ====="
 
       - name: Upload build log
         if: always()

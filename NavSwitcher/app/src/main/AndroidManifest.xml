@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 现有权限保留 -->
+    <!-- 权限按你现有保留 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
@@ -11,26 +11,17 @@
         android:theme="@style/Theme.AppCompat.Light.NoActionBar"
         android:supportsRtl="true">
 
-        <!-- Shizuku Provider：已修成 exported=true，OK -->
+        <!-- Shizuku Provider（必须保留，且 exported=true） -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
             android:exported="true" />
 
-        <!-- ★ 新增：声明用户服务（被 Shizuku 绑定） -->
-        <service
-            android:name=".ShellUserService"
-            android:exported="false"
-            android:stopWithTask="false" />
-            <!-- 不要写 android:process，Shizuku 会用我们在代码里
-                 UserServiceArgs.processNameSuffix("sh") 派生进程 -->
-
-        <!-- 悬浮球前台服务 -->
+        <!-- 只声明你自己的前台悬浮窗服务 -->
         <service
             android:name=".FloatService"
             android:exported="false"
-            android:foregroundServiceType="dataSync"
-            android:stopWithTask="false" />
+            android:foregroundServiceType="dataSync" />
 
         <activity
             android:name=".MainActivity"
@@ -41,5 +32,6 @@
             </intent-filter>
         </activity>
 
+        <!-- 注意：不要声明 .ShellUserService！！！ -->
     </application>
 </manifest>

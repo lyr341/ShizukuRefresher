@@ -9,7 +9,11 @@ import android.graphics.PixelFormat
 import android.os.*
 import android.provider.Settings
 import android.util.Log
-import android.view.*
+import android.view.GestureDetector
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -48,7 +52,7 @@ class FloatService : Service() {
         }
         val noti = NotificationCompat.Builder(this, CH_ID)
             .setContentTitle("悬浮球已启用")
-            .setContentText("点击在“三键/手势”间切换导航方式")
+            .setContentText("点击在“三键/手势”之间切换")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .build()
         startForeground(NOTI_ID, noti)
@@ -76,9 +80,9 @@ class FloatService : Service() {
             y = 600
         }
 
-        val sizePx = dpToPx(56 * 5)   // 5× 放大
+        val sizePx = dpToPx(56 * 5)   // 放大 5 倍
         ball = ImageView(this).apply {
-            setImageResource(android.R.drawable.btn_star_big_on)
+            setImageResource(android.R.drawable.btn_star_big_on) // 先用大五角星，后面你想换圆球就换成自定义 drawable
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             scaleType = ImageView.ScaleType.FIT_CENTER
             isClickable = true

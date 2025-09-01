@@ -31,15 +31,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val shizukuPermReqCode = 10086
-    private val shizukuPermListener: Shizuku.OnRequestPermissionResultListener =
+    
+    // ✅ 用 lazy 初始化，避免“must be initialized”报错
+    private val shizukuPermListener by lazy {
         Shizuku.OnRequestPermissionResultListener { _, grantResult ->
             if (grantResult == PackageManager.PERMISSION_GRANTED) {
                 startFloatService()
             } else {
                 Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             }
-            Shizuku.removeRequestPermissionResultListener(shizukuPermListener)
+            // 用完及时移除监听
+            Shizuku.removeRequestPermissionResultListener(this.shizukuPermListener)
         }
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

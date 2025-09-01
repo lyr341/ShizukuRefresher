@@ -30,16 +30,9 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        try {
-            startForegroundX()
-            addBallX()
-            Log.d(TAG, "onCreate OK, ball added")
-            Toast.makeText(this, "悬浮球服务已启动", Toast.LENGTH_SHORT).show()
-        } catch (t: Throwable) {
-            Log.e(TAG, "onCreate error", t)
-            Toast.makeText(this, "悬浮球启动失败: ${t.message}", Toast.LENGTH_LONG).show()
-            stopSelf()
-        }
+        startForegroundX()
+        addBallX()
+        Log.d(TAG, "onCreate OK, ball added")
     }
 
     private fun startForegroundX() {
@@ -57,9 +50,6 @@ class FloatService : Service() {
     }
 
     private fun addBallX() {
-        if (!android.provider.Settings.canDrawOverlays(this)) {
-            throw IllegalStateException("未授予悬浮窗权限")
-        }
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val type = if (Build.VERSION.SDK_INT >= 26)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -70,9 +60,7 @@ class FloatService : Service() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.START or Gravity.TOP
@@ -92,7 +80,6 @@ class FloatService : Service() {
                 val now = SystemClock.uptimeMillis()
                 if (now - lastTapTs < 500) return true
                 lastTapTs = now
-                Toast.makeText(applicationContext, "切换中…", Toast.LENGTH_SHORT).show()
                 toggleNavMode()
                 return true
             }
@@ -129,13 +116,11 @@ class FloatService : Service() {
             "cmd overlay disable com.android.internal.systemui.navbar.gestural",
             "cmd statusbar restart"
         )
-        ShellExec.send(this, cmds) { code ->
-            if (code == 0) {
-                Toast.makeText(this, "切换命令已执行", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "切换失败，code=$code", Toast.LENGTH_LONG).show()
+        Thread {
+            for (cmd in cmds) {
+                Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd)).waitFor()
             }
-        }
+        }.start()
     }
 
     override fun onDestroy() {

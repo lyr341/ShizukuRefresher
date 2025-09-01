@@ -6,7 +6,10 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
-import android.os.*
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -151,55 +154,42 @@ class FloatService : Service() {
 
     private fun onBallClicked() {
         Log.d(TAG, "ball clicked")
-        Toast.makeText(this, "准备切换…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "切换中…", Toast.LENGTH_SHORT).show()
+        toggleNavMode()
+    }
 
+    // 一次脚本内完成“判断+切换”，减少延迟
+    private fun toggleNavMode() {
         if (!Shizuku.pingBinder()) {
-            Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
-            Log.w(TAG, "Shizuku not running")
+            Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
             return
         }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
-            Log.w(TAG, "No Shizuku permission")
+            Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_SHORT).show()
             return
         }
 
-        isThreeButtonEnabled { isThree ->
-            val cmds = if (!isThree) {
-                listOf(
-                    "cmd overlay enable com.android.internal.systemui.navbar.threebutton",
-                    "cmd overlay disable com.android.internal.systemui.navbar.gestural",
-                    "cmd statusbar restart"
-                )
+        val script = """
+            if cmd overlay list | grep -q '\[x\] com.android.internal.systemui.navbar.threebutton'; then
+              cmd overlay enable-exclusive com.android.internal.systemui.navbar.gestural >/dev/null 2>&1
+            else
+              cmd overlay enable-exclusive com.android.internal.systemui.navbar.threebutton >/dev/null 2>&1
+            fi
+            # 如需强制刷新，可去掉下一行注释，但会增加切换时间
+            # cmd statusbar restart >/dev/null 2>&1
+        """.trimIndent()
+
+        execShell(script) { code, _, err ->
+            if (code == 0) {
+                Toast.makeText(this, "已切换", Toast.LENGTH_SHORT).show()
             } else {
-                listOf(
-                    "cmd overlay enable com.android.internal.systemui.navbar.gestural",
-                    "cmd overlay disable com.android.internal.systemui.navbar.threebutton",
-                    "cmd statusbar restart"
-                )
-            }
-
-            execShell(cmds.joinToString(" && ")) { code, out, err ->
-                Log.d(TAG, "toggle exit=$code\nstdout=$out\nstderr=$err")
-                if (code == 0) {
-                    Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
-                }
+                Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
+                if (err.isNotBlank()) Log.e(TAG, "toggleNavMode error: $err")
             }
         }
     }
 
-    private fun isThreeButtonEnabled(cb: (Boolean) -> Unit) {
-        val cmd = "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.threebutton' | wc -l"
-        execShell(cmd) { code, out, _ ->
-            val enabled = (code == 0) && (out.trim().toIntOrNull() ?: 0) > 0
-            Log.d(TAG, "threebutton enabled? $enabled, raw=$out, code=$code")
-            cb(enabled)
-        }
-    }
-
-    // 替换 FloatService.kt 里的 execShell 方法
+    // 统一的 shell 执行：优先走 Shizuku.newProcess，失败回落到 Runtime.exec
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
@@ -215,10 +205,9 @@ class FloatService : Service() {
                         null
                     ) as java.lang.Process
                 } else {
-                    // 回退（非 shell）
                     Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
                 }
-    
+
                 val sbOut = StringBuilder()
                 val sbErr = StringBuilder()
                 BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
@@ -248,7 +237,6 @@ class FloatService : Service() {
             main.post { cb(exit, stdout, stderr) }
         }
     }
-
 
     override fun onDestroy() {
         super.onDestroy()

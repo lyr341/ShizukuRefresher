@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.PixelFormat
 import android.os.*
 import android.provider.Settings
+import android.util.Log
 import android.view.*
 import android.widget.ImageView
 import android.widget.Toast
@@ -21,6 +22,7 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val OVERLAY_THREE = "com.android.internal.systemui.navbar.threebutton"
         private const val OVERLAY_GESTURE = "com.android.internal.systemui.navbar.gestural"
+        private const val TAG = "FloatService"
     }
 
     private lateinit var wm: WindowManager
@@ -35,7 +37,7 @@ class FloatService : Service() {
         super.onCreate()
         startForeground()
         addBall()
-        log("onCreate done")
+        Log.d(TAG, "onCreate")
     }
 
     private fun startForeground() {
@@ -74,25 +76,23 @@ class FloatService : Service() {
             y = 600
         }
 
-        val sizePx = dpToPx(56 * 5) // 5× 放大
+        val sizePx = dpToPx(56 * 5)   // 5× 放大
         ball = ImageView(this).apply {
             setImageResource(android.R.drawable.btn_star_big_on)
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             scaleType = ImageView.ScaleType.FIT_CENTER
             isClickable = true
-            isFocusable = false
         }
         wm.addView(ball, params)
 
-        // 点击识别更稳：SingleTapConfirmed + 长按兜底
         val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                log("onSingleTapConfirmed")
+                Log.d(TAG, "onSingleTapConfirmed")
                 handleTap()
                 return true
             }
             override fun onLongPress(e: MotionEvent) {
-                log("onLongPress -> as tap fallback")
+                Log.d(TAG, "onLongPress as tap fallback")
                 handleTap()
             }
         })
@@ -100,18 +100,13 @@ class FloatService : Service() {
         ball.setOnTouchListener { v, event ->
             val handledByGesture = gd.onTouchEvent(event)
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    lastRawX = event.rawX
-                    lastRawY = event.rawY
-                }
+                MotionEvent.ACTION_DOWN -> { lastRawX = event.rawX; lastRawY = event.rawY }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - lastRawX).toInt()
                     val dy = (event.rawY - lastRawY).toInt()
-                    params.x += dx
-                    params.y += dy
+                    params.x += dx; params.y += dy
                     wm.updateViewLayout(v, params)
-                    lastRawX = event.rawX
-                    lastRawY = event.rawY
+                    lastRawX = event.rawX; lastRawY = event.rawY
                 }
             }
             handledByGesture || event.actionMasked == MotionEvent.ACTION_MOVE
@@ -135,8 +130,7 @@ class FloatService : Service() {
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) { toast("未授予 Shizuku 权限"); return }
 
         val cur = currentNavMode()
-        log("current navigation_mode=$cur")
-        val toThree = lastToThree ?: (cur == 2) // 第一次根据系统值判断方向
+        val toThree = lastToThree ?: (cur == 2) // 首次：手势(2) -> 三键
         val cmds = if (toThree) {
             listOf(
                 "cmd overlay enable $OVERLAY_THREE",
@@ -150,10 +144,10 @@ class FloatService : Service() {
                 "cmd statusbar restart"
             )
         }
-        log("exec: ${cmds.joinToString(" ; ")}")
+        Log.d(TAG, "exec: ${cmds.joinToString(" && ")}")
 
-        ShizukuShell.execTwo(this, cmds) { code ->
-            log("exec done code=$code")
+        ShizukuShell.execTwo(this, cmds) { code, out, err ->
+            Log.d(TAG, "exec done code=$code\nstdout=${out}\nstderr=${err}")
             if (code == 0) {
                 lastToThree = !toThree
                 toast(if (toThree) "已切到：三键导航" else "已切到：手势导航")
@@ -164,12 +158,11 @@ class FloatService : Service() {
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
-    private fun log(s: String) { android.util.Log.d("FloatService", s) }
 
     override fun onDestroy() {
         super.onDestroy()
         try { wm.removeView(ball) } catch (_: Throwable) {}
-        log("onDestroy")
+        Log.d(TAG, "onDestroy")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

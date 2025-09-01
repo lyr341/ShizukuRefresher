@@ -6,12 +6,17 @@ import android.app.Service
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.*
+import android.provider.Settings
 import android.util.Log
 import android.view.*
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import rikka.shizuku.Shizuku
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.nio.charset.Charset
+import java.util.concurrent.Executors
 
 class FloatService : Service() {
 
@@ -28,6 +33,9 @@ class FloatService : Service() {
     @Volatile private var lastTapTs = 0L
     private var lastRawX = 0f
     private var lastRawY = 0f
+
+    // 用单线程池跑所有 shell，避免并发
+    private val shellExec = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
         super.onCreate()
@@ -46,7 +54,9 @@ class FloatService : Service() {
     private fun startForegroundX() {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
-            val ch = NotificationChannel(CH_ID, "NavSwitcher", NotificationManager.IMPORTANCE_MIN)
+            val ch = NotificationChannel(
+                CH_ID, "NavSwitcher", NotificationManager.IMPORTANCE_MIN
+            )
             nm.createNotificationChannel(ch)
         }
         val noti = NotificationCompat.Builder(this, CH_ID)
@@ -58,9 +68,13 @@ class FloatService : Service() {
     }
 
     private fun addBallX() {
-        if (!android.provider.Settings.canDrawOverlays(this)) {
+        if (!Settings.canDrawOverlays(this)) {
             throw IllegalStateException("未授予悬浮窗权限")
         }
+        if (!Shizuku.pingBinder()) {
+            throw IllegalStateException("Shizuku 未运行或未授权")
+        }
+
         val wmgr = getSystemService(WINDOW_SERVICE) as WindowManager
         wm = wmgr
         val type = if (Build.VERSION.SDK_INT >= 26)
@@ -84,8 +98,7 @@ class FloatService : Service() {
         params = lp
 
         val iv = ImageView(this).apply {
-            // 先用五角星（你之前能看见它说明窗口链路是通的）
-            // 放大 3 倍以便更好点按
+            // 先用系统大星星，放大一点方便点按
             setImageResource(android.R.drawable.btn_star_big_on)
             scaleX = 3f
             scaleY = 3f
@@ -125,38 +138,64 @@ class FloatService : Service() {
         }
     }
 
-    // 读取当前 overlay 开关作为“手势/三键”判断依据
-    private fun isThreeButtonActive(onResult: (Boolean) -> Unit) {
-        ShizukuShell.exec(
-            this,
-            "cmd overlay list | grep com.android.internal.systemui.navbar.threebutton | wc -l"
-        ) { code ->
-            // code 只是退出码，不是行数；我们改用返回码==0作为“命令成功”，再用另一条更稳妥的判断
-            // 直接判断三键是否enabled
-            ShizukuShell.exec(
-                this,
-                "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.threebutton' | wc -l"
-            ) { _ ->
-                // 无法拿到stdout，这里退而求其次：再发一条只看 gesture 是否开启
-                ShizukuShell.exec(
-                    this,
-                    "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.gestural' | wc -l"
-                ) { _ -> 
-                    // 我们不纠结数量了：用“尝试切换后再发系统栏重启”达成最终一致
-                    // 这里先走保守逻辑：认为“勾选三键”为已启用
-                    onResult(false) // 先假定不是三键，点一下切到三键
-                }
+    /**
+     * 通过 Shizuku 执行 shell，拿到 exitCode / stdout / stderr
+     */
+    private fun sh(
+        cmd: String,
+        onDone: (code: Int, out: String, err: String) -> Unit
+    ) {
+        shellExec.execute {
+            var code = -1
+            var outStr = ""
+            var errStr = ""
+            try {
+                val proc = Shizuku.newProcess(arrayOf("sh", "-c", cmd), null, null)
+                val out = BufferedReader(InputStreamReader(proc.inputStream, Charset.forName("UTF-8")))
+                val err = BufferedReader(InputStreamReader(proc.errorStream, Charset.forName("UTF-8")))
+                val sbOut = StringBuilder()
+                val sbErr = StringBuilder()
+                var line: String?
+                while (out.readLine().also { line = it } != null) sbOut.appendLine(line)
+                while (err.readLine().also { line = it } != null) sbErr.appendLine(line)
+                code = proc.waitFor()
+                outStr = sbOut.toString()
+                errStr = sbErr.toString()
+            } catch (t: Throwable) {
+                errStr = t.message ?: t.toString()
+                Log.e(TAG, "sh error: $cmd", t)
+            }
+            Handler(Looper.getMainLooper()).post {
+                onDone(code, outStr, errStr)
             }
         }
     }
 
-    private fun toggleNavMode() {
-        // 保守逻辑：每次点击先“切到三键”；如果已经是三键，则切回手势
-        isThreeButtonActive { isThree ->
-            if (!Shizuku.pingBinder()) {
-                Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
-                return@isThreeButtonActive
+    /**
+     * 判断是否处于“三键导航”
+     * 通过 overlay 列表中已启用项判断
+     */
+    private fun isThreeButtonActive(onResult: (Boolean) -> Unit) {
+        val grep = "cmd overlay list"
+        sh(grep) { code, out, _ ->
+            if (code != 0) {
+                onResult(false)
+                return@sh
             }
+            // 例：已启用项通常形如 "[x] com.android.internal.systemui.navbar.threebutton"
+            val enabledThree = out.lines().any {
+                it.contains("[x]") && it.contains("com.android.internal.systemui.navbar.threebutton")
+            }
+            onResult(enabledThree)
+        }
+    }
+
+    private fun toggleNavMode() {
+        if (!Shizuku.pingBinder()) {
+            Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
+            return
+        }
+        isThreeButtonActive { isThree ->
             val cmds = if (!isThree) {
                 listOf(
                     "cmd overlay enable com.android.internal.systemui.navbar.threebutton",
@@ -170,20 +209,43 @@ class FloatService : Service() {
                     "cmd statusbar restart"
                 )
             }
-            ShizukuShell.execTwo(this, cmds) { code ->
-                if (code == 0) {
-                    Toast.makeText(this, "切换命令已执行", Toast.LENGTH_SHORT).show()
+            runBatch(cmds) { ok, logs ->
+                if (ok) {
+                    Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(this, "切换失败，code=$code", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "切换失败\n$logs", Toast.LENGTH_LONG).show()
                 }
             }
         }
+    }
+
+    private fun runBatch(cmds: List<String>, onDone: (ok: Boolean, logs: String) -> Unit) {
+        val logSb = StringBuilder()
+        fun runAt(i: Int) {
+            if (i >= cmds.size) {
+                onDone(true, logSb.toString())
+                return
+            }
+            val cmd = cmds[i]
+            sh(cmd) { code, out, err ->
+                logSb.appendLine("[$code] $cmd")
+                if (out.isNotBlank()) logSb.appendLine(out.trim())
+                if (err.isNotBlank()) logSb.appendLine(err.trim())
+                if (code == 0) {
+                    runAt(i + 1)
+                } else {
+                    onDone(false, logSb.toString())
+                }
+            }
+        }
+        runAt(0)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         try { wm?.removeView(ball) } catch (_: Throwable) {}
         wm = null; ball = null; params = null
+        shellExec.shutdownNow()
     }
 
     override fun onBind(intent: Intent?) = null

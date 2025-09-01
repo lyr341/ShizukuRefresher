@@ -17,7 +17,7 @@ class MainActivity : AppCompatActivity() {
 
     private val reqPostNotification = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* 不管结果 */ }
+    ) { /* 不管用户选什么，不拦流程 */ }
 
     private val reqOverlay = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -38,7 +38,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             }
-            try { Shizuku.removeRequestPermissionResultListener(shizukuPermListener) } catch (_: Throwable) {}
+            Shizuku.removeRequestPermissionResultListener(shizukuPermListener)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,7 +56,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun ensureAndStart() {
         if (!Settings.canDrawOverlays(this)) {
-            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
             reqOverlay.launch(intent)
             return
         }
@@ -65,13 +68,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun maybeRequestShizukuAndStart() {
         if (!Shizuku.pingBinder()) {
-            Toast.makeText(this, "Shizuku 未运行，请先在 Shizuku App 中启动", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Shizuku 未运行，请先启动它", Toast.LENGTH_LONG).show()
             return
         }
         if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
             startFloatService()
         } else {
-            try { Shizuku.addRequestPermissionResultListener(shizukuPermListener) } catch (_: Throwable) {}
+            Shizuku.addRequestPermissionResultListener(shizukuPermListener)
             Shizuku.requestPermission(shizukuPermReqCode)
         }
     }

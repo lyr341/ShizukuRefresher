@@ -17,7 +17,7 @@ class MainActivity : AppCompatActivity() {
 
     private val reqPostNotification = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* 不管用户选什么，不拦流程 */ }
+    ) { }
 
     private val reqOverlay = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun maybeRequestShizukuAndStart() {
         if (!Shizuku.pingBinder()) {
-            Toast.makeText(this, "Shizuku 未运行，请先启动它", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
             return
         }
         if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {

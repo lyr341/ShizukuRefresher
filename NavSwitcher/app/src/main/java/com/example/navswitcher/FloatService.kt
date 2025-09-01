@@ -6,8 +6,13 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.*
-import android.view.*
+import android.view.GestureDetector
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -18,19 +23,21 @@ class FloatService : Service() {
     companion object {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
-        private const val TAG = "FloatService"
     }
 
     private lateinit var wm: WindowManager
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var ball: ImageView
 
-    // 拖拽用：记录按下点，避免“飘移”
+    // 拖动用：记录上一次原始坐标，避免“漂移”
     private var lastRawX = 0f
     private var lastRawY = 0f
 
     // 点击防抖
     @Volatile private var lastTapTs = 0L
+
+    // dp -> px
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onCreate() {
         super.onCreate()
@@ -73,27 +80,36 @@ class FloatService : Service() {
             y = 600
         }
 
+        // 56dp 的圆形小球（半透明蓝）
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xAA33B5E5.toInt())
+        }
+
         ball = ImageView(this).apply {
-            setImageResource(android.R.drawable.btn_star_big_on)
+            layoutParams = ViewGroup.LayoutParams(dp(56), dp(56))
+            background = bg
+            // 如果想在圆球里放个小图标，可取消下一行注释
+            // setImageResource(android.R.drawable.ic_media_play)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(6), dp(6), dp(6), dp(6))
         }
         wm.addView(ball, params)
 
-        val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+        val gesture = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: MotionEvent): Boolean {
                 val now = SystemClock.uptimeMillis()
                 if (now - lastTapTs < 800) return true // 防抖 800ms
                 lastTapTs = now
-                Toast.makeText(applicationContext, "点击触发：开始执行测试命令", Toast.LENGTH_SHORT).show()
+                Toast.makeText(applicationContext, "已触发：切手势→等待→切回三键", Toast.LENGTH_SHORT).show()
                 doOnce()
                 return true
             }
         })
 
         ball.setOnTouchListener { v, event ->
-            // 交给手势识别（单击）
-            val handledByGesture = gd.onTouchEvent(event)
+            val handledByGesture = gesture.onTouchEvent(event)
 
-            // 再处理拖动
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastRawX = event.rawX
@@ -113,9 +129,9 @@ class FloatService : Service() {
         }
     }
 
-    // 最小可验证链路：先跑 whoami
+    // 最小可验证链路：先跑一次“切手势→等待→切回三键”
     private fun doOnce() {
-        // 1) Shizuku 状态 & 授权检查（原来这段有个“等号方向”写反了）
+        // 1) Shizuku 状态 & 授权检查（注意比较符号方向）
         if (!Shizuku.pingBinder()) {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
             return
@@ -126,7 +142,6 @@ class FloatService : Service() {
         }
 
         // 2) 执行测试命令
-        // 先切到手势，再切回三键（刷新 UI），中间留一点点间隔
         ShizukuShell.execTwo(
             this,
             listOf(
@@ -137,11 +152,10 @@ class FloatService : Service() {
         ) { code ->
             Toast.makeText(
                 this,
-                if (code == 0) "已触发：切手势→等待→切回三键" else "执行失败，code=$code",
+                if (code == 0) "执行成功（code=0）" else "执行失败，code=$code",
                 Toast.LENGTH_SHORT
             ).show()
         }
-
     }
 
     override fun onDestroy() {

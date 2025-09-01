@@ -61,15 +61,23 @@ jobs:
             (cd NavSwitcher && gradle clean)
           fi
 
-      # 关键：无论成功失败，都把完整日志保存出来
+      # 关键：把日志 tee 到文件，并强制 Kotlin 编译器 in-process、纯文本输出
       - name: Build Debug APK (full log to file)
-        continue-on-error: true
+        env:
+          TERM: xterm-256color
         run: |
           set -euxo pipefail
+          # 统一的 Gradle 参数，确保日志完整：
+          #  - --no-configuration-cache  避免缓存掩盖错误
+          #  - --console=plain           纯文本控制台，去掉花色
+          #  - -Dkotlin.colors.enabled=false  关闭彩色，便于 grep
+          #  - -Dkotlin.compiler.execution.strategy=in-process  让 Kotlin 不走 workers，直接在进程内打印诊断
+          COMMON_OPTS="--stacktrace --info --warning-mode all --no-configuration-cache --console=plain -Dkotlin.colors.enabled=false -Dkotlin.compiler.execution.strategy=in-process"
+
           if [ -x NavSwitcher/gradlew ]; then
-            (cd NavSwitcher && ./gradlew :app:assembleDebug --stacktrace --info --warning-mode all) 2>&1 | tee NavSwitcher/buildlog.txt
+            (cd NavSwitcher && ./gradlew :app:assembleDebug $COMMON_OPTS) 2>&1 | tee buildlog.txt
           else
-            (cd NavSwitcher && gradle :app:assembleDebug --stacktrace --info --warning-mode all) 2>&1 | tee NavSwitcher/buildlog.txt
+            (cd NavSwitcher && gradle :app:assembleDebug $COMMON_OPTS) 2>&1 | tee buildlog.txt
           fi
 
       # 如果失败，单独抽取 Kotlin 编译错误的 “e: …” 行，方便定位
@@ -80,12 +88,18 @@ jobs:
           grep -n "^e: " NavSwitcher/buildlog.txt || true
           echo "===== End ====="
 
-      - name: Upload build log
+      # 失败时多打点：把 Kotlin/AAPT 报告目录都打包，便于排查
+      - name: Upload build reports & logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: buildlog
-          path: NavSwitcher/buildlog.txt
+          name: build-artifacts
+          path: |
+            NavSwitcher/buildlog.txt
+            NavSwitcher/app/build/reports/**
+            NavSwitcher/app/build/tmp/kotlin-compile/**
+            NavSwitcher/app/build/outputs/logs/**
+            NavSwitcher/app/build/outputs/apk/debug/**
 
       - name: Upload debug APK
         if: success()

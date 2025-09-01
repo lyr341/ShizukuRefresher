@@ -3,6 +3,7 @@ package com.example.navswitcher
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager          // ★ 必须有
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle

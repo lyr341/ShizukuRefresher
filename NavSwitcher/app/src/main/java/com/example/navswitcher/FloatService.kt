@@ -145,17 +145,14 @@ class FloatService : Service() {
         ShizukuShell.execTwo(
             this,
             listOf(
-                "settings put secure navigation_mode 2",
+                "input keyevent HOME",
                 "sleep 1",
-                "settings put secure navigation_mode 0"
+                "input keyevent APP_SWITCH"
             )
         ) { code ->
-            Toast.makeText(
-                this,
-                if (code == 0) "执行成功（code=0）" else "执行失败，code=$code",
-                Toast.LENGTH_SHORT
-            ).show()
+            Toast.makeText(this, if (code == 0) "链路OK" else "失败 code=$code", Toast.LENGTH_SHORT).show()
         }
+
     }
 
     override fun onDestroy() {

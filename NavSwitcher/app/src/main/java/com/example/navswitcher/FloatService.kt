@@ -5,7 +5,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -30,12 +32,10 @@ class FloatService : Service() {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
-    }
 
-    // 冷却与状态
-    private val COOLDOWN_MS = 600L
-    @Volatile private var isToggling = false
-    @Volatile private var lastToggleAt = 0L
+        // 点击冷却时间（毫秒）
+        private const val MIN_TOGGLE_INTERVAL_MS = 600L
+    }
 
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
@@ -45,6 +45,10 @@ class FloatService : Service() {
     private var ball: ImageView? = null
     private var lastRawX = 0f
     private var lastRawY = 0f
+
+    // 冷却 & 并发
+    @Volatile private var lastToggleTs = 0L
+    @Volatile private var isToggling = false
 
     // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
@@ -123,10 +127,22 @@ class FloatService : Service() {
             y = 600
         }
 
+        // 圆形按钮（放大 4 倍）
         ball = ImageView(this).apply {
-            setImageResource(android.R.drawable.btn_star_big_on)
-            scaleX = 2.0f
-            scaleY = 2.0f
+            // 圆形背景
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.argb(220, 255, 215, 0)) // 金黄
+            }
+            background = bg
+
+            // 中间图标（白色播放箭头，可自行替换）
+            setImageResource(android.R.drawable.ic_media_play)
+            setColorFilter(Color.WHITE)
+
+            // 放大两倍（在原 2 倍基础上 -> 4 倍）
+            scaleX = 4.0f
+            scaleY = 4.0f
 
             isClickable = true
             setOnClickListener { onBallClicked() }
@@ -158,31 +174,28 @@ class FloatService : Service() {
     }
 
     private fun onBallClicked() {
-        val now = SystemClock.elapsedRealtime()
-        if (isToggling || now - lastToggleAt < COOLDOWN_MS) {
-            // 防抖中，直接忽略
+        val now = SystemClock.uptimeMillis()
+        if (now - lastToggleTs < MIN_TOGGLE_INTERVAL_MS) {
             return
         }
+        if (isToggling) {
+            return
+        }
+        lastToggleTs = now
         isToggling = true
-        lastToggleAt = now
-
-        // 点击期间视觉反馈与禁点
-        ball?.isEnabled = false
-        ball?.alpha = 0.6f
 
         Log.d(TAG, "ball clicked")
-        Toast.makeText(this, "准备切换…", Toast.LENGTH_SHORT).show()
 
         if (!Shizuku.pingBinder()) {
+            isToggling = false
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
             Log.w(TAG, "Shizuku not running")
-            resetToggleUiState()
             return
         }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            isToggling = false
             Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             Log.w(TAG, "No Shizuku permission")
-            resetToggleUiState()
             return
         }
 
@@ -203,22 +216,14 @@ class FloatService : Service() {
 
             execShell(cmds.joinToString(" && ")) { code, out, err ->
                 Log.d(TAG, "toggle exit=$code\nstdout=$out\nstderr=$err")
+                isToggling = false
                 if (code == 0) {
                     Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
                 }
-                // 不论成功失败，都要复位冷却与UI状态（从完成时刻起算冷却）
-                resetToggleUiState()
-                lastToggleAt = SystemClock.elapsedRealtime()
             }
         }
-    }
-
-    private fun resetToggleUiState() {
-        isToggling = false
-        ball?.isEnabled = true
-        ball?.alpha = 1f
     }
 
     private fun isThreeButtonEnabled(cb: (Boolean) -> Unit) {
@@ -230,23 +235,26 @@ class FloatService : Service() {
         }
     }
 
-    // 执行 shell：优先用 Shizuku.newProcess，失败则回退 Runtime.exec
+    /**
+     * 以 Shizuku 权限运行 shell：
+     * - 优先反射调用 Shizuku.newProcess("sh -c <cmd>")，可拿到 stdout/stderr
+     * - 失败则退回 Runtime.exec（兼容但权限有限）
+     */
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
             var out = ""
             var err = ""
             try {
-                val proc: java.lang.Process = if (newProcessMethod != null) {
+                val proc: Process = if (newProcessMethod != null) {
                     @Suppress("UNCHECKED_CAST")
                     newProcessMethod!!.invoke(
                         null,
                         arrayOf("sh", "-c", cmd),
                         null,
                         null
-                    ) as java.lang.Process
+                    ) as Process
                 } else {
-                    // 回退（非 Shizuku shell）
                     Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
                 }
 

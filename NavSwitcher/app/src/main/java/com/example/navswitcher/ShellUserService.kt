@@ -5,6 +5,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.os.*
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
@@ -17,22 +19,27 @@ class ShellUserService : Service() {
         private const val KEY_CMD = "cmd"
         private const val KEY_CODE = "code"
 
+        // 强引用，避免 GC 导致断连
         @Volatile private var keepConn: ServiceConnection? = null
 
+        // 绑定 Shizuku 用户服务，回调拿到 Messenger
         fun bind(context: Context, onReady: (Messenger?) -> Unit) {
-            // 只用 ComponentName 这条路，不要传 Class
-            val cn = ComponentName(context.packageName, ShellUserService::class.java.name)
+            // 基本可用性检查：Shizuku 在线 & 已授权
+            if (!Shizuku.pingBinder()) { onReady(null); return }
+            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) { onReady(null); return }
 
-            // 这几个字段非常重要：suffix 非空、防调试信息、version
+            val cn = ComponentName(context.packageName, ShellUserService::class.java.name)
+            val isDebug = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
             val args = Shizuku.UserServiceArgs(cn)
                 .daemon(false)
-                .processNameSuffix("sh")           // 必填，非空
-                .debuggable(BuildConfig.DEBUG)
+                .processNameSuffix("sh")  // 必填：非空
+                .debuggable(isDebug)      // 不再依赖 BuildConfig
                 .version(1)
 
             val conn = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                    onReady(Messenger(service))
+                    onReady(if (service != null) Messenger(service) else null)
                 }
                 override fun onServiceDisconnected(name: ComponentName?) {
                     onReady(null)
@@ -43,6 +50,7 @@ class ShellUserService : Service() {
         }
     }
 
+    // Service 端接收消息并执行命令
     private val incoming = object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(msg: Message) {
             if (msg.what == MSG_RUN_CMD) {
@@ -51,7 +59,7 @@ class ShellUserService : Service() {
                 val reply = Message.obtain(null, MSG_RUN_CMD).apply {
                     data = Bundle().apply { putInt(KEY_CODE, code) }
                 }
-                try { msg.replyTo?.send(reply) } catch (_: Throwable) {}
+                try { msg.replyTo?.send(reply) } catch (_: Throwable) { }
             } else {
                 super.handleMessage(msg)
             }
@@ -68,4 +76,10 @@ class ShellUserService : Service() {
         p.waitFor()
         p.exitValue()
     } catch (_: Throwable) { -1 }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // 允许连接对象被回收
+        keepConn = null
+    }
 }

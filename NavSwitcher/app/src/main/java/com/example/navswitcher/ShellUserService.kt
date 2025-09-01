@@ -2,7 +2,6 @@ package com.example.navswitcher
 
 import android.app.Service
 import android.content.ComponentName
-import com.example.navswitcher.BuildConfig  
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection

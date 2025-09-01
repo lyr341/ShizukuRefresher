@@ -199,29 +199,26 @@ class FloatService : Service() {
         }
     }
 
-    /**
-     * 优先用（反射）Shizuku.newProcess 以 shell 身份执行；
-     * 如果拿不到该方法，则退化为 Runtime.exec（可能无权改 overlay，但至少不崩）。
-     */
+    // 替换 FloatService.kt 里的 execShell 方法
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
             var out = ""
             var err = ""
             try {
-                val proc: Process = if (newProcessMethod != null) {
+                val proc: java.lang.Process = if (newProcessMethod != null) {
                     @Suppress("UNCHECKED_CAST")
                     newProcessMethod!!.invoke(
                         null,
                         arrayOf("sh", "-c", cmd),
                         null,
                         null
-                    ) as Process
+                    ) as java.lang.Process
                 } else {
                     // 回退（非 shell）
                     Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
                 }
-
+    
                 val sbOut = StringBuilder()
                 val sbErr = StringBuilder()
                 BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
@@ -251,6 +248,7 @@ class FloatService : Service() {
             main.post { cb(exit, stdout, stderr) }
         }
     }
+
 
     override fun onDestroy() {
         super.onDestroy()

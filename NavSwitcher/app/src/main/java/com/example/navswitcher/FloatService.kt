@@ -4,13 +4,13 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.PixelFormat
 import android.os.*
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.lang.reflect.Method
 import java.util.concurrent.Executors
 
 class FloatService : Service() {
@@ -34,9 +35,32 @@ class FloatService : Service() {
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var ball: ImageView? = null
-
     private var lastRawX = 0f
     private var lastRawY = 0f
+
+    // 反射拿 Shizuku.newProcess(String[], String[], String)
+    private val newProcessMethod: Method? by lazy {
+        try {
+            Shizuku::class.java.getMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            )
+        } catch (_: Throwable) {
+            try {
+                Shizuku::class.java.getDeclaredMethod(
+                    "newProcess",
+                    Array<String>::class.java,
+                    Array<String>::class.java,
+                    String::class.java
+                ).apply { isAccessible = true }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Shizuku.newProcess not found via reflection: $t")
+                null
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -92,19 +116,13 @@ class FloatService : Service() {
         }
 
         ball = ImageView(this).apply {
-            // 用系统大星星图标，确保不是“纯方块”
             setImageResource(android.R.drawable.btn_star_big_on)
-            // 稍微大一点好点按
             scaleX = 2.0f
             scaleY = 2.0f
 
-            // 直接用 onClick，避免手势判断干扰
             isClickable = true
-            setOnClickListener {
-                onBallClicked()
-            }
+            setOnClickListener { onBallClicked() }
 
-            // 支持拖动
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
@@ -124,7 +142,6 @@ class FloatService : Service() {
                         return@setOnTouchListener true
                     }
                 }
-                // 让点击事件还能触发
                 false
             }
         }
@@ -147,7 +164,6 @@ class FloatService : Service() {
             return
         }
 
-        // 先判断当前是否是三键，决定切换方向
         isThreeButtonEnabled { isThree ->
             val cmds = if (!isThree) {
                 listOf(
@@ -174,9 +190,6 @@ class FloatService : Service() {
         }
     }
 
-    /**
-     * 通过 shell 查询是否启用三键（看 overlay 是否勾选）
-     */
     private fun isThreeButtonEnabled(cb: (Boolean) -> Unit) {
         val cmd = "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.threebutton' | wc -l"
         execShell(cmd) { code, out, _ ->
@@ -187,7 +200,8 @@ class FloatService : Service() {
     }
 
     /**
-     * 用 Shizuku 以 shell 身份执行命令
+     * 优先用（反射）Shizuku.newProcess 以 shell 身份执行；
+     * 如果拿不到该方法，则退化为 Runtime.exec（可能无权改 overlay，但至少不崩）。
      */
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
@@ -195,8 +209,18 @@ class FloatService : Service() {
             var out = ""
             var err = ""
             try {
-                // 注意：某些 sh 里没有 grep/awk，最好写成尽量通用的命令；此处先保留
-                val proc = Shizuku.newProcess(arrayOf("sh", "-c", cmd), null, null)
+                val proc: Process = if (newProcessMethod != null) {
+                    @Suppress("UNCHECKED_CAST")
+                    newProcessMethod!!.invoke(
+                        null,
+                        arrayOf("sh", "-c", cmd),
+                        null,
+                        null
+                    ) as Process
+                } else {
+                    // 回退（非 shell）
+                    Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+                }
 
                 val sbOut = StringBuilder()
                 val sbErr = StringBuilder()

@@ -19,8 +19,6 @@ class FloatService : Service() {
     companion object {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
-
-        // ColorOS/一加系常见 overlay 包名（如有差异，可按你机器实际替换）
         private const val OVERLAY_THREE = "com.android.internal.systemui.navbar.threebutton"
         private const val OVERLAY_GESTURE = "com.android.internal.systemui.navbar.gestural"
     }
@@ -28,21 +26,16 @@ class FloatService : Service() {
     private lateinit var wm: WindowManager
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var ball: ImageView
-
-    // 拖拽用
     private var lastRawX = 0f
     private var lastRawY = 0f
-
-    // 点击防抖
     @Volatile private var lastTapTs = 0L
-
-    // 记忆上一次切到的模式（true=三键，false=手势，null=未知）
     private var lastToThree: Boolean? = null
 
     override fun onCreate() {
         super.onCreate()
         startForeground()
         addBall()
+        log("onCreate done")
     }
 
     private fun startForeground() {
@@ -59,15 +52,13 @@ class FloatService : Service() {
         startForeground(NOTI_ID, noti)
     }
 
-    private fun dpToPx(dp: Int): Int =
-        (dp * resources.displayMetrics.density + 0.5f).toInt()
+    private fun dpToPx(dp: Int) = (dp * resources.displayMetrics.density + 0.5f).toInt()
 
     private fun addBall() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val type = if (Build.VERSION.SDK_INT >= 26)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
         params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -83,23 +74,26 @@ class FloatService : Service() {
             y = 600
         }
 
-        // 放大约 5 倍（取 56dp*5 ≈ 280dp）
-        val sizePx = dpToPx(56 * 5)
-
+        val sizePx = dpToPx(56 * 5) // 5× 放大
         ball = ImageView(this).apply {
             setImageResource(android.R.drawable.btn_star_big_on)
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             scaleType = ImageView.ScaleType.FIT_CENTER
+            isClickable = true
+            isFocusable = false
         }
         wm.addView(ball, params)
 
+        // 点击识别更稳：SingleTapConfirmed + 长按兜底
         val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onSingleTapUp(e: MotionEvent): Boolean {
-                val now = SystemClock.uptimeMillis()
-                if (now - lastTapTs < 600) return true // 防抖
-                lastTapTs = now
-                toggleNav()
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                log("onSingleTapConfirmed")
+                handleTap()
                 return true
+            }
+            override fun onLongPress(e: MotionEvent) {
+                log("onLongPress -> as tap fallback")
+                handleTap()
             }
         })
 
@@ -124,27 +118,25 @@ class FloatService : Service() {
         }
     }
 
-    /** 读取当前系统导航模式（2=手势；0/1=三键/两键等），读不到返回 -1 */
+    private fun handleTap() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastTapTs < 500) return
+        lastTapTs = now
+        Toast.makeText(this, "切换中…", Toast.LENGTH_SHORT).show()
+        toggleNav()
+    }
+
     private fun currentNavMode(): Int =
         try { Settings.Secure.getInt(contentResolver, "navigation_mode", -1) }
         catch (_: Throwable) { -1 }
 
-    /** 点击切换逻辑：根据当前/上次状态在三键与手势间互切 */
     private fun toggleNav() {
-        // 基本 Shizuku 状态检查
-        if (!Shizuku.pingBinder()) {
-            Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_SHORT).show()
-            return
-        }
+        if (!Shizuku.pingBinder()) { toast("Shizuku 未运行"); return }
+        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) { toast("未授予 Shizuku 权限"); return }
 
-        // 判定目标：优先用上次记忆；第一次则看系统当前值
         val cur = currentNavMode()
-        val toThree = lastToThree ?: (cur == 2)  // 当前是手势(2) → 切三键；否则切手势
-
+        log("current navigation_mode=$cur")
+        val toThree = lastToThree ?: (cur == 2) // 第一次根据系统值判断方向
         val cmds = if (toThree) {
             listOf(
                 "cmd overlay enable $OVERLAY_THREE",
@@ -158,24 +150,26 @@ class FloatService : Service() {
                 "cmd statusbar restart"
             )
         }
+        log("exec: ${cmds.joinToString(" ; ")}")
 
         ShizukuShell.execTwo(this, cmds) { code ->
+            log("exec done code=$code")
             if (code == 0) {
-                lastToThree = !toThree  // 下一次反向切
-                Toast.makeText(
-                    this,
-                    if (toThree) "已切到：三键导航" else "已切到：手势导航",
-                    Toast.LENGTH_SHORT
-                ).show()
+                lastToThree = !toThree
+                toast(if (toThree) "已切到：三键导航" else "已切到：手势导航")
             } else {
-                Toast.makeText(this, "执行失败，code=$code", Toast.LENGTH_SHORT).show()
+                toast("执行失败 code=$code")
             }
         }
     }
 
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+    private fun log(s: String) { android.util.Log.d("FloatService", s) }
+
     override fun onDestroy() {
         super.onDestroy()
         try { wm.removeView(ball) } catch (_: Throwable) {}
+        log("onDestroy")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

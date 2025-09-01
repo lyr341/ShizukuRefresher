@@ -5,7 +5,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
 import android.os.*
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
@@ -37,7 +36,7 @@ class ShellUserService : Service() {
                 }
             }
             keepConn = conn
-            Shizuku.bindUserService(args, conn, Context.BIND_AUTO_CREATE)
+            Shizuku.bindUserService(args, conn)
         }
     }
 

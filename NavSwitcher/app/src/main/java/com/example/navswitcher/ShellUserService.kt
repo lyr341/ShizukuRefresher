@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
 import android.os.*
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
@@ -12,7 +13,7 @@ import java.io.InputStreamReader
 
 /**
  * 跑在 Shizuku（shell uid）进程中的 Service。
- * 接收一条命令字符串，执行后把 exit code / stdout / stderr 回传。
+ * 通过 Messenger 接收一条命令字符串，执行后把 exit code 回传。
  */
 class ShellUserService : Service() {
 
@@ -25,14 +26,23 @@ class ShellUserService : Service() {
 
         @Volatile private var keepConn: ServiceConnection? = null
 
-        /** 绑定 user service，拿到一个与之通信的 Messenger */
+        // 绑定 user service，拿到一个与之通信的 Messenger
         fun bind(context: Context, onReady: (Messenger?) -> Unit) {
+            // 基本可用性检查
+            if (!Shizuku.pingBinder()) { onReady(null); return }
+            if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                onReady(null); return
+            }
+
+            // 用 Context 判断是否 debuggable，避免使用 BuildConfig
+            val isDebug = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
             val cn = ComponentName(context.packageName, ShellUserService::class.java.name)
             val args = Shizuku.UserServiceArgs(cn)
                 .daemon(false)
-                .processNameSuffix("sh")        // 必填：非空
-                .debuggable(BuildConfig.DEBUG)  // 可选
-                .version(1)                     // 可选
+                .processNameSuffix("sh")   // 必填：非空
+                .debuggable(isDebug)       // 不再依赖 BuildConfig
+                .version(1)
 
             val conn = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -62,7 +72,7 @@ class ShellUserService : Service() {
                         putString(KEY_ERR, err)
                     }
                 }
-                try { msg.replyTo?.send(reply) } catch (_: Throwable) {}
+                try { msg.replyTo?.send(reply) } catch (_: Throwable) { }
             } else {
                 super.handleMessage(msg)
             }
@@ -72,33 +82,29 @@ class ShellUserService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = messenger.binder
 
-    private fun runShellWithOutput(cmd: String): Triple<Int, String, String> = try {
-        val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-        val out = BufferedReader(InputStreamReader(p.inputStream)).use { r ->
-            buildString {
-                var line = r.readLine()
-                var read = 0
-                while (line != null && read < 64 * 1024) { // 限个 64KB，避免超大
-                    append(line).append('\n')
-                    read += line.length + 1
-                    line = r.readLine()
+    private fun runShellWithOutput(cmd: String): Triple<Int, String, String> {
+        return try {
+            val p = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+            val outSb = StringBuilder()
+            val errSb = StringBuilder()
+            BufferedReader(InputStreamReader(p.inputStream)).use { r ->
+                var line: String?
+                while (true) {
+                    line = r.readLine() ?: break
+                    outSb.append(line).append('\n')
                 }
             }
-        }
-        val err = BufferedReader(InputStreamReader(p.errorStream)).use { r ->
-            buildString {
-                var line = r.readLine()
-                var read = 0
-                while (line != null && read < 64 * 1024) {
-                    append(line).append('\n')
-                    read += line.length + 1
-                    line = r.readLine()
+            BufferedReader(InputStreamReader(p.errorStream)).use { r ->
+                var line: String?
+                while (true) {
+                    line = r.readLine() ?: break
+                    errSb.append(line).append('\n')
                 }
             }
+            p.waitFor()
+            Triple(p.exitValue(), outSb.toString(), errSb.toString())
+        } catch (t: Throwable) {
+            Triple(-1, "", t.message ?: "")
         }
-        p.waitFor()
-        Triple(p.exitValue(), out, err)
-    } catch (t: Throwable) {
-        Triple(-1, "", t.toString())
     }
 }

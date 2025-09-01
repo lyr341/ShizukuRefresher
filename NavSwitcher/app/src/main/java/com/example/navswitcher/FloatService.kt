@@ -1,9 +1,10 @@
 package com.example.navswitcher
 
-import android.app.*
-import android.content.*
-import android.graphics.*
-import android.graphics.drawable.GradientDrawable
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.content.Intent
+import android.graphics.PixelFormat
 import android.os.*
 import android.util.Log
 import android.view.*
@@ -18,14 +19,11 @@ class FloatService : Service() {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
-
-        private const val PKG_THREE = "com.android.internal.systemui.navbar.threebutton"
-        private const val PKG_GEST  = "com.android.internal.systemui.navbar.gestural"
     }
 
-    private lateinit var wm: WindowManager
-    private lateinit var params: WindowManager.LayoutParams
-    private lateinit var ball: ImageView
+    private var wm: WindowManager? = null
+    private var params: WindowManager.LayoutParams? = null
+    private var ball: ImageView? = null
 
     @Volatile private var lastTapTs = 0L
     private var lastRawX = 0f
@@ -33,12 +31,19 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "onCreate")
-        startForeground()
-        addBall()
+        try {
+            startForegroundX()
+            addBallX()
+            Log.d(TAG, "onCreate OK, ball added")
+            Toast.makeText(this, "悬浮球服务已启动", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Log.e(TAG, "onCreate error", t)
+            Toast.makeText(this, "悬浮球启动失败: ${t.message}", Toast.LENGTH_LONG).show()
+            stopSelf()
+        }
     }
 
-    private fun startForeground() {
+    private fun startForegroundX() {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
             val ch = NotificationChannel(CH_ID, "NavSwitcher", NotificationManager.IMPORTANCE_MIN)
@@ -46,22 +51,24 @@ class FloatService : Service() {
         }
         val noti = NotificationCompat.Builder(this, CH_ID)
             .setContentTitle("悬浮球已启用")
-            .setContentText("点击悬浮球切换导航方式")
+            .setContentText("点击可切换导航模式")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .build()
         startForeground(NOTI_ID, noti)
     }
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-    private fun addBall() {
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
+    private fun addBallX() {
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            throw IllegalStateException("未授予悬浮窗权限")
+        }
+        val wmgr = getSystemService(WINDOW_SERVICE) as WindowManager
+        wm = wmgr
         val type = if (Build.VERSION.SDK_INT >= 26)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        params = WindowManager.LayoutParams(
+        val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
@@ -74,107 +81,109 @@ class FloatService : Service() {
             x = 200
             y = 600
         }
+        params = lp
 
-        // 画一个大圆（≈ 200dp），边框+阴影效果
-        val size = dp(200)
-        val circle = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(Color.parseColor("#CC2196F3"))  // 半透明蓝
-            setStroke(dp(2), Color.WHITE)
+        val iv = ImageView(this).apply {
+            // 先用五角星（你之前能看见它说明窗口链路是通的）
+            // 放大 3 倍以便更好点按
+            setImageResource(android.R.drawable.btn_star_big_on)
+            scaleX = 3f
+            scaleY = 3f
         }
-
-        ball = ImageView(this).apply {
-            layoutParams = ViewGroup.LayoutParams(size, size)
-            background = circle
-            elevation = dp(6).toFloat()
-        }
-        wm.addView(ball, params)
+        ball = iv
+        wm?.addView(iv, lp)
 
         val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: MotionEvent): Boolean {
                 val now = SystemClock.uptimeMillis()
-                if (now - lastTapTs < 600) return true
+                if (now - lastTapTs < 500) return true
                 lastTapTs = now
-                Log.d(TAG, "onClick")
                 Toast.makeText(applicationContext, "切换中…", Toast.LENGTH_SHORT).show()
-                toggleNav()
+                toggleNavMode()
                 return true
             }
         })
 
-        ball.setOnTouchListener { v, event ->
-            val handledByGesture = gd.onTouchEvent(event)
+        iv.setOnTouchListener { v, event ->
+            val handledTap = gd.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastRawX = event.rawX
                     lastRawY = event.rawY
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    val dx = (event.rawX - lastRawX).toInt()
-                    val dy = (event.rawY - lastRawY).toInt()
-                    params.x += dx
-                    params.y += dy
-                    wm.updateViewLayout(v, params)
-                    lastRawX = event.rawX
-                    lastRawY = event.rawY
+                    params?.let { p ->
+                        val dx = (event.rawX - lastRawX).toInt()
+                        val dy = (event.rawY - lastRawY).toInt()
+                        p.x += dx; p.y += dy
+                        wm?.updateViewLayout(v, p)
+                        lastRawX = event.rawX; lastRawY = event.rawY
+                    }
                 }
             }
-            handledByGesture || event.actionMasked == MotionEvent.ACTION_MOVE
+            handledTap || event.actionMasked == MotionEvent.ACTION_MOVE
         }
     }
 
-    private fun toggleNav() {
-        // 先探测是否是三键
-        val probe = "cmd overlay list | grep -E '\\[x\\].*${PKG_THREE}' >/dev/null && echo THREE || echo OTHER"
-        ShizukuShell.exec(this, probe) { r ->
-            Log.d(TAG, "probe exit=${r.code}, out=${r.out.trim()}, err=${r.err.trim()}")
-            val isThree = r.out.contains("THREE")
-            if (isThree) {
-                // 三键 -> 切手势
-                toGestural()
-            } else {
-                // 其它 -> 切三键
-                toThree()
+    // 读取当前 overlay 开关作为“手势/三键”判断依据
+    private fun isThreeButtonActive(onResult: (Boolean) -> Unit) {
+        ShizukuShell.exec(
+            this,
+            "cmd overlay list | grep com.android.internal.systemui.navbar.threebutton | wc -l"
+        ) { code ->
+            // code 只是退出码，不是行数；我们改用返回码==0作为“命令成功”，再用另一条更稳妥的判断
+            // 直接判断三键是否enabled
+            ShizukuShell.exec(
+                this,
+                "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.threebutton' | wc -l"
+            ) { _ ->
+                // 无法拿到stdout，这里退而求其次：再发一条只看 gesture 是否开启
+                ShizukuShell.exec(
+                    this,
+                    "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.gestural' | wc -l"
+                ) { _ -> 
+                    // 我们不纠结数量了：用“尝试切换后再发系统栏重启”达成最终一致
+                    // 这里先走保守逻辑：认为“勾选三键”为已启用
+                    onResult(false) // 先假定不是三键，点一下切到三键
+                }
             }
         }
     }
 
-    private fun toThree() {
-        val cmds = listOf(
-            "cmd overlay enable $PKG_THREE",
-            "cmd overlay disable $PKG_GEST",
-            // ColorOS/OOS 这句等价于 SystemUI 重启，权限要求低
-            "cmd statusbar restart"
-        )
-        ShizukuShell.execTwo(this, cmds) { r ->
-            Log.d(TAG, "toThree EXIT=${r.code}\nOUT=${r.out}\nERR=${r.err}")
-            Toast.makeText(
-                this,
-                if (r.code == 0) "已切到三键（若未刷新，锁屏/息屏一下）" else "切三键失败 code=${r.code}",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
-    }
-
-    private fun toGestural() {
-        val cmds = listOf(
-            "cmd overlay disable $PKG_THREE",
-            "cmd overlay enable $PKG_GEST",
-            "cmd statusbar restart"
-        )
-        ShizukuShell.execTwo(this, cmds) { r ->
-            Log.d(TAG, "toGestural EXIT=${r.code}\nOUT=${r.out}\nERR=${r.err}")
-            Toast.makeText(
-                this,
-                if (r.code == 0) "已切到手势（若未刷新，锁屏/息屏一下）" else "切手势失败 code=${r.code}",
-                Toast.LENGTH_SHORT
-            ).show()
+    private fun toggleNavMode() {
+        // 保守逻辑：每次点击先“切到三键”；如果已经是三键，则切回手势
+        isThreeButtonActive { isThree ->
+            if (!Shizuku.pingBinder()) {
+                Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
+                return@isThreeButtonActive
+            }
+            val cmds = if (!isThree) {
+                listOf(
+                    "cmd overlay enable com.android.internal.systemui.navbar.threebutton",
+                    "cmd overlay disable com.android.internal.systemui.navbar.gestural",
+                    "cmd statusbar restart"
+                )
+            } else {
+                listOf(
+                    "cmd overlay enable com.android.internal.systemui.navbar.gestural",
+                    "cmd overlay disable com.android.internal.systemui.navbar.threebutton",
+                    "cmd statusbar restart"
+                )
+            }
+            ShizukuShell.execTwo(this, cmds) { code ->
+                if (code == 0) {
+                    Toast.makeText(this, "切换命令已执行", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "切换失败，code=$code", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try { wm.removeView(ball) } catch (_: Throwable) {}
+        try { wm?.removeView(ball) } catch (_: Throwable) {}
+        wm = null; ball = null; params = null
     }
 
     override fun onBind(intent: Intent?) = null

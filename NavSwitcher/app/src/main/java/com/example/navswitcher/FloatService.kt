@@ -6,13 +6,9 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.os.*
-import android.view.GestureDetector
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.ViewGroup
-import android.view.WindowManager
+import android.provider.Settings
+import android.view.*
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -23,21 +19,25 @@ class FloatService : Service() {
     companion object {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
+
+        // ColorOS/一加系常见 overlay 包名（如有差异，可按你机器实际替换）
+        private const val OVERLAY_THREE = "com.android.internal.systemui.navbar.threebutton"
+        private const val OVERLAY_GESTURE = "com.android.internal.systemui.navbar.gestural"
     }
 
     private lateinit var wm: WindowManager
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var ball: ImageView
 
-    // 拖动用：记录上一次原始坐标，避免“漂移”
+    // 拖拽用
     private var lastRawX = 0f
     private var lastRawY = 0f
 
     // 点击防抖
     @Volatile private var lastTapTs = 0L
 
-    // dp -> px
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    // 记忆上一次切到的模式（true=三键，false=手势，null=未知）
+    private var lastToThree: Boolean? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -53,11 +53,14 @@ class FloatService : Service() {
         }
         val noti = NotificationCompat.Builder(this, CH_ID)
             .setContentTitle("悬浮球已启用")
-            .setContentText("点击悬浮球触发一次命令")
+            .setContentText("点击在“三键/手势”间切换导航方式")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .build()
         startForeground(NOTI_ID, noti)
     }
+
+    private fun dpToPx(dp: Int): Int =
+        (dp * resources.displayMetrics.density + 0.5f).toInt()
 
     private fun addBall() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -80,36 +83,28 @@ class FloatService : Service() {
             y = 600
         }
 
-        // 56dp 的圆形小球（半透明蓝）
-        val bg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(0xAA33B5E5.toInt())
-        }
+        // 放大约 5 倍（取 56dp*5 ≈ 280dp）
+        val sizePx = dpToPx(56 * 5)
 
         ball = ImageView(this).apply {
-            layoutParams = ViewGroup.LayoutParams(dp(56), dp(56))
-            background = bg
-            // 如果想在圆球里放个小图标，可取消下一行注释
-            // setImageResource(android.R.drawable.ic_media_play)
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(6), dp(6), dp(6), dp(6))
+            setImageResource(android.R.drawable.btn_star_big_on)
+            layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
+            scaleType = ImageView.ScaleType.FIT_CENTER
         }
         wm.addView(ball, params)
 
-        val gesture = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+        val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: MotionEvent): Boolean {
                 val now = SystemClock.uptimeMillis()
-                if (now - lastTapTs < 800) return true // 防抖 800ms
+                if (now - lastTapTs < 600) return true // 防抖
                 lastTapTs = now
-                Toast.makeText(applicationContext, "已触发：切手势→等待→切回三键", Toast.LENGTH_SHORT).show()
-                doOnce()
+                toggleNav()
                 return true
             }
         })
 
         ball.setOnTouchListener { v, event ->
-            val handledByGesture = gesture.onTouchEvent(event)
-
+            val handledByGesture = gd.onTouchEvent(event)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     lastRawX = event.rawX
@@ -129,9 +124,14 @@ class FloatService : Service() {
         }
     }
 
-    // 最小可验证链路：先跑一次“切手势→等待→切回三键”
-    private fun doOnce() {
-        // 1) Shizuku 状态 & 授权检查（注意比较符号方向）
+    /** 读取当前系统导航模式（2=手势；0/1=三键/两键等），读不到返回 -1 */
+    private fun currentNavMode(): Int =
+        try { Settings.Secure.getInt(contentResolver, "navigation_mode", -1) }
+        catch (_: Throwable) { -1 }
+
+    /** 点击切换逻辑：根据当前/上次状态在三键与手势间互切 */
+    private fun toggleNav() {
+        // 基本 Shizuku 状态检查
         if (!Shizuku.pingBinder()) {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_SHORT).show()
             return
@@ -141,18 +141,36 @@ class FloatService : Service() {
             return
         }
 
-        // 2) 执行测试命令
-        ShizukuShell.execTwo(
-            this,
+        // 判定目标：优先用上次记忆；第一次则看系统当前值
+        val cur = currentNavMode()
+        val toThree = lastToThree ?: (cur == 2)  // 当前是手势(2) → 切三键；否则切手势
+
+        val cmds = if (toThree) {
             listOf(
-                "input keyevent HOME",
-                "sleep 1",
-                "input keyevent APP_SWITCH"
+                "cmd overlay enable $OVERLAY_THREE",
+                "cmd overlay disable $OVERLAY_GESTURE",
+                "cmd statusbar restart"
             )
-        ) { code ->
-            Toast.makeText(this, if (code == 0) "链路OK" else "失败 code=$code", Toast.LENGTH_SHORT).show()
+        } else {
+            listOf(
+                "cmd overlay enable $OVERLAY_GESTURE",
+                "cmd overlay disable $OVERLAY_THREE",
+                "cmd statusbar restart"
+            )
         }
 
+        ShizukuShell.execTwo(this, cmds) { code ->
+            if (code == 0) {
+                lastToThree = !toThree  // 下一次反向切
+                Toast.makeText(
+                    this,
+                    if (toThree) "已切到：三键导航" else "已切到：手势导航",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                Toast.makeText(this, "执行失败，code=$code", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     override fun onDestroy() {

@@ -8,15 +8,13 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
+import android.os.*
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -32,9 +30,6 @@ class FloatService : Service() {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
-
-        // 点击冷却时间（毫秒）
-        private const val MIN_TOGGLE_INTERVAL_MS = 600L
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -42,15 +37,12 @@ class FloatService : Service() {
 
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
-    private var ball: ImageView? = null
+    private var ball: FrameLayout? = null
     private var lastRawX = 0f
     private var lastRawY = 0f
+    private var isDragging = false
+    private var lastClickTs = 0L
 
-    // 冷却 & 并发
-    @Volatile private var lastToggleTs = 0L
-    @Volatile private var isToggling = false
-
-    // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
         try {
             Shizuku::class.java.getMethod(
@@ -127,41 +119,54 @@ class FloatService : Service() {
             y = 600
         }
 
-        // 圆形按钮（放大 4 倍）
-        ball = ImageView(this).apply {
-            // 圆形背景
-            val bg = GradientDrawable().apply {
+        // 外层 FrameLayout（圆形灰色背景 = 点击区域）
+        ball = FrameLayout(this).apply {
+            val size = 200 // 实际点击区域大小（像素，可改）
+            layoutParams = FrameLayout.LayoutParams(size, size)
+
+            background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.argb(220, 255, 215, 0)) // 金黄
+                setColor(Color.GRAY) // 灰色背景
             }
-            background = bg
 
-            // 中间图标（白色播放箭头，可自行替换）
-            setImageResource(android.R.drawable.ic_media_play)
-            setColorFilter(Color.WHITE)
-
-            // 放大两倍（在原 2 倍基础上 -> 4 倍）
-            scaleX = 4.0f
-            scaleY = 4.0f
-
-            isClickable = true
-            setOnClickListener { onBallClicked() }
+            val icon = ImageView(this@FloatService).apply {
+                setImageResource(android.R.drawable.ic_media_play)
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+            }
+            addView(icon)
 
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         lastRawX = ev.rawX
                         lastRawY = ev.rawY
+                        isDragging = false
+                        return@setOnTouchListener true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         params?.let { p ->
                             val dx = (ev.rawX - lastRawX).toInt()
                             val dy = (ev.rawY - lastRawY).toInt()
+                            if (dx * dx + dy * dy > 10) isDragging = true
                             p.x += dx
                             p.y += dy
                             wm?.updateViewLayout(v, p)
                             lastRawX = ev.rawX
                             lastRawY = ev.rawY
+                        }
+                        return@setOnTouchListener true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (!isDragging) {
+                            val now = SystemClock.uptimeMillis()
+                            if (now - lastClickTs > 500) { // 冷却 0.5 秒
+                                lastClickTs = now
+                                onBallClicked()
+                            }
                         }
                         return@setOnTouchListener true
                     }
@@ -174,26 +179,15 @@ class FloatService : Service() {
     }
 
     private fun onBallClicked() {
-        val now = SystemClock.uptimeMillis()
-        if (now - lastToggleTs < MIN_TOGGLE_INTERVAL_MS) {
-            return
-        }
-        if (isToggling) {
-            return
-        }
-        lastToggleTs = now
-        isToggling = true
-
         Log.d(TAG, "ball clicked")
+        Toast.makeText(this, "准备切换…", Toast.LENGTH_SHORT).show()
 
         if (!Shizuku.pingBinder()) {
-            isToggling = false
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
             Log.w(TAG, "Shizuku not running")
             return
         }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            isToggling = false
             Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             Log.w(TAG, "No Shizuku permission")
             return
@@ -216,7 +210,6 @@ class FloatService : Service() {
 
             execShell(cmds.joinToString(" && ")) { code, out, err ->
                 Log.d(TAG, "toggle exit=$code\nstdout=$out\nstderr=$err")
-                isToggling = false
                 if (code == 0) {
                     Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
                 } else {
@@ -235,25 +228,20 @@ class FloatService : Service() {
         }
     }
 
-    /**
-     * 以 Shizuku 权限运行 shell：
-     * - 优先反射调用 Shizuku.newProcess("sh -c <cmd>")，可拿到 stdout/stderr
-     * - 失败则退回 Runtime.exec（兼容但权限有限）
-     */
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
             var out = ""
             var err = ""
             try {
-                val proc: Process = if (newProcessMethod != null) {
+                val proc: java.lang.Process = if (newProcessMethod != null) {
                     @Suppress("UNCHECKED_CAST")
                     newProcessMethod!!.invoke(
                         null,
                         arrayOf("sh", "-c", cmd),
                         null,
                         null
-                    ) as Process
+                    ) as java.lang.Process
                 } else {
                     Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
                 }
@@ -281,10 +269,7 @@ class FloatService : Service() {
                 err = t.message ?: t.toString()
                 Log.e(TAG, "execShell error", t)
             }
-            val stdout = out
-            val stderr = err
-            val exit = code
-            main.post { cb(exit, stdout, stderr) }
+            main.post { cb(code, out, err) }
         }
     }
 

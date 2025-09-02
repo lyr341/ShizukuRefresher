@@ -7,7 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.drawable GradientDrawable
+import android.graphics.drawable.GradientDrawable
 import android.os.*
 import android.provider.Settings
 import android.util.Log
@@ -32,8 +32,8 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // 调整按钮大小与冷却时间
-        private const val BALL_SIZE_DP = 72          // 圆形直径（dp）
+        // 可调参数
+        private const val BALL_SIZE_DP = 72          // 圆的直径（dp）
         private const val CLICK_COOLDOWN_MS = 500L   // 点击冷却（毫秒）
     }
 
@@ -116,7 +116,7 @@ class FloatService : Service() {
 
         val sizePx = dp(BALL_SIZE_DP)
 
-        // 顶层窗口尺寸用固定宽高，确保圆形点击区域真正变大
+        // 顶层窗口固定宽高，保证可点击区域=圆形显示区域
         params = WindowManager.LayoutParams(
             sizePx,
             sizePx,
@@ -131,7 +131,7 @@ class FloatService : Service() {
             y = dp(160)
         }
 
-        // 纯圆形灰色背景 = 点击区域
+        // 纯圆形灰色按钮，整个圆即点击区域
         ball = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -139,7 +139,7 @@ class FloatService : Service() {
             )
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.GRAY)            // 灰色
+                setColor(Color.GRAY)
             }
             isClickable = true
             isFocusable = false

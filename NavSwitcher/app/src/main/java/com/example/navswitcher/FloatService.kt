@@ -7,15 +7,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable GradientDrawable
 import android.os.*
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import rikka.shizuku.Shizuku
@@ -23,6 +23,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.lang.reflect.Method
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 
 class FloatService : Service() {
 
@@ -30,6 +31,10 @@ class FloatService : Service() {
         private const val CH_ID = "float_foreground"
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
+
+        // 调整按钮大小与冷却时间
+        private const val BALL_SIZE_DP = 72          // 圆形直径（dp）
+        private const val CLICK_COOLDOWN_MS = 500L   // 点击冷却（毫秒）
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -38,11 +43,14 @@ class FloatService : Service() {
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var ball: FrameLayout? = null
+
     private var lastRawX = 0f
     private var lastRawY = 0f
     private var isDragging = false
     private var lastClickTs = 0L
+    private var touchSlop = 0
 
+    // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
         try {
             Shizuku::class.java.getMethod(
@@ -68,6 +76,7 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         try {
             startForegroundX()
             addBallX()
@@ -105,9 +114,12 @@ class FloatService : Service() {
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
+        val sizePx = dp(BALL_SIZE_DP)
+
+        // 顶层窗口尺寸用固定宽高，确保圆形点击区域真正变大
         params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            sizePx,
+            sizePx,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -115,29 +127,22 @@ class FloatService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.START or Gravity.TOP
-            x = 200
-            y = 600
+            x = dp(24)
+            y = dp(160)
         }
 
-        // 外层 FrameLayout（圆形灰色背景 = 点击区域）
+        // 纯圆形灰色背景 = 点击区域
         ball = FrameLayout(this).apply {
-            val size = 200 // 实际点击区域大小（像素，可改）
-            layoutParams = FrameLayout.LayoutParams(size, size)
-
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.GRAY) // 灰色背景
+                setColor(Color.GRAY)            // 灰色
             }
-
-            val icon = ImageView(this@FloatService).apply {
-                setImageResource(android.R.drawable.ic_media_play)
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-                scaleType = ImageView.ScaleType.CENTER_INSIDE
-            }
-            addView(icon)
+            isClickable = true
+            isFocusable = false
 
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
@@ -151,7 +156,9 @@ class FloatService : Service() {
                         params?.let { p ->
                             val dx = (ev.rawX - lastRawX).toInt()
                             val dy = (ev.rawY - lastRawY).toInt()
-                            if (dx * dx + dy * dy > 10) isDragging = true
+                            if (!isDragging && (dx * dx + dy * dy) > touchSlop * touchSlop) {
+                                isDragging = true
+                            }
                             p.x += dx
                             p.y += dy
                             wm?.updateViewLayout(v, p)
@@ -163,7 +170,7 @@ class FloatService : Service() {
                     MotionEvent.ACTION_UP -> {
                         if (!isDragging) {
                             val now = SystemClock.uptimeMillis()
-                            if (now - lastClickTs > 500) { // 冷却 0.5 秒
+                            if (now - lastClickTs >= CLICK_COOLDOWN_MS) {
                                 lastClickTs = now
                                 onBallClicked()
                             }
@@ -179,9 +186,6 @@ class FloatService : Service() {
     }
 
     private fun onBallClicked() {
-        Log.d(TAG, "ball clicked")
-        Toast.makeText(this, "准备切换…", Toast.LENGTH_SHORT).show()
-
         if (!Shizuku.pingBinder()) {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
             Log.w(TAG, "Shizuku not running")
@@ -192,6 +196,8 @@ class FloatService : Service() {
             Log.w(TAG, "No Shizuku permission")
             return
         }
+
+        Toast.makeText(this, "准备切换…", Toast.LENGTH_SHORT).show()
 
         isThreeButtonEnabled { isThree ->
             val cmds = if (!isThree) {
@@ -272,6 +278,9 @@ class FloatService : Service() {
             main.post { cb(code, out, err) }
         }
     }
+
+    private fun dp(v: Int): Int =
+        (v * resources.displayMetrics.density).roundToInt()
 
     override fun onDestroy() {
         super.onDestroy()

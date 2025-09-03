@@ -14,7 +14,6 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.*
-import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -35,12 +34,12 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // 节奏/阈值（更敏感地识别“浅红”）
+        // 取屏与检测
         private const val CAPTURE_INTERVAL_MS = 700L
         private const val DETECT_REGION_RATIO = 0.22f
-        private const val DETECT_HIT_RATIO = 0.035f     // 3.5% 命中像素比例即可触发
+        private const val DETECT_HIT_RATIO = 0.035f   // 命中像素比例阈值
         private const val COOLDOWN_MS = 2500L
-        private const val SAMPLE_STEP = 2               // 降低步长：提升灵敏度
+        private const val SAMPLE_STEP = 2
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -120,9 +119,13 @@ class FloatService : Service() {
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
+        // —— 关键：悬浮窗的宽高用固定像素，不要 WRAP_CONTENT —— 
+        val sizePx = (80 * resources.displayMetrics.density).toInt() // 80dp 大圆
+        val strokePx = (2 * resources.displayMetrics.density).toInt()
+
         params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            sizePx, // 宽
+            sizePx, // 高
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -134,17 +137,14 @@ class FloatService : Service() {
             y = 480
         }
 
-        // —— 真·大圆形按钮（~80dp），半透明灰 + 浅白描边，点击区域=整圆 ——
-        val sizePx = (80 * resources.displayMetrics.density).toInt()
-        val strokePx = (2 * resources.displayMetrics.density).toInt()
+        // 圆形灰色按钮（实心灰 + 浅白描边），点击区域=整圆
         ball = ImageView(this).apply {
-            layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#CC808080")) // 更实一点的灰（80%不透明）
-                setStroke(strokePx, Color.parseColor("#66FFFFFF")) // 浅白描边更显眼
+                setColor(Color.parseColor("#CC808080"))          // 实心灰（80%不透明）
+                setStroke(strokePx, Color.parseColor("#66FFFFFF"))// 浅白描边
             }
-            // 不再放中心小点，避免看起来像“小点”
+            // 不放中心小点，避免看起来像“小点”；用背景决定大小
             setImageDrawable(null)
 
             isClickable = true
@@ -347,14 +347,10 @@ class FloatService : Service() {
                 val valv = hsv[2]   // 0..1
 
                 val isRedHue = (hue <= 20f || hue >= 340f)
-                // “浅红”：亮度高、饱和度中低，避免深红/大红（高饱和 + 低/中亮度）
-                val isLightRed =
-                    isRedHue &&
-                    valv >= 0.88f &&            // 很亮
-                    sat in 0.18f..0.55f         // 中低饱和
-                val isDeepRed =
-                    isRedHue &&
-                    (sat >= 0.60f || valv <= 0.80f) // 大红：高饱或偏暗
+                // 浅红：很亮 + 中低饱和
+                val isLightRed = isRedHue && valv >= 0.88f && sat in 0.18f..0.55f
+                // 大红（排除）：高饱和或偏暗
+                val isDeepRed = isRedHue && (sat >= 0.60f || valv <= 0.80f)
 
                 if (isLightRed && !isDeepRed) hit++
 
@@ -417,10 +413,7 @@ class FloatService : Service() {
                 err = t.message ?: t.toString()
                 Log.e(TAG, "execShell error", t)
             }
-            val stdout = out
-            val stderr = err
-            val exit = code
-            main.post { cb(exit, stdout, stderr) }
+            main.post { cb(code, out, err) }
         }
     }
 

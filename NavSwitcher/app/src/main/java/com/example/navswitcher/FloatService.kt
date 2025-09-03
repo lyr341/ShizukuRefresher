@@ -35,12 +35,12 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // 取屏与检测的节奏/阈值
-        private const val CAPTURE_INTERVAL_MS = 800L
-        private const val DETECT_REGION_RATIO = 0.22f     // 右下角取 22%×22% 区域
-        private const val DETECT_HIT_RATIO = 0.06f        // 命中像素比例阈值 6%
-        private const val COOLDOWN_MS = 2500L             // 自动切换冷却 2.5s
-        private const val SAMPLE_STEP = 3                 // 像素采样步长（越大越省电）
+        // 节奏/阈值（更敏感地识别“浅红”）
+        private const val CAPTURE_INTERVAL_MS = 700L
+        private const val DETECT_REGION_RATIO = 0.22f
+        private const val DETECT_HIT_RATIO = 0.035f     // 3.5% 命中像素比例即可触发
+        private const val COOLDOWN_MS = 2500L
+        private const val SAMPLE_STEP = 2               // 降低步长：提升灵敏度
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -130,21 +130,22 @@ class FloatService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.START or Gravity.TOP
-            x = 180
-            y = 520
+            x = 160
+            y = 480
         }
 
-        // 圆形灰色按钮（点击区域即圆）
-        val sizePx = (56 * resources.displayMetrics.density).toInt() // ~56dp
+        // —— 真·大圆形按钮（~80dp），半透明灰 + 浅白描边，点击区域=整圆 ——
+        val sizePx = (80 * resources.displayMetrics.density).toInt()
+        val strokePx = (2 * resources.displayMetrics.density).toInt()
         ball = ImageView(this).apply {
             layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#808A8A8A")) // 半透明灰
+                setColor(Color.parseColor("#CC808080")) // 更实一点的灰（80%不透明）
+                setStroke(strokePx, Color.parseColor("#66FFFFFF")) // 浅白描边更显眼
             }
-            // 中心放个小点，作为视觉反馈
-            setImageBitmap(makeDotBitmap((sizePx * 0.3f).toInt(), Color.WHITE))
-            scaleType = ImageView.ScaleType.CENTER
+            // 不再放中心小点，避免看起来像“小点”
+            setImageDrawable(null)
 
             isClickable = true
             setOnClickListener { onBallClickedToggleCapture() }
@@ -174,7 +175,7 @@ class FloatService : Service() {
                         }
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (isDragging) return@setOnTouchListener true // 拖拽不当点击
+                        if (isDragging) return@setOnTouchListener true
                     }
                 }
                 false
@@ -182,14 +183,6 @@ class FloatService : Service() {
         }
 
         wm?.addView(ball, params)
-    }
-
-    private fun makeDotBitmap(diameter: Int, color: Int): Bitmap {
-        val bmp = Bitmap.createBitmap(diameter, diameter, Bitmap.Config.ARGB_8888)
-        val c = Canvas(bmp)
-        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
-        c.drawCircle(diameter / 2f, diameter / 2f, diameter / 2f, p)
-        return bmp
     }
 
     // 点击：开始/停止取屏识别
@@ -217,7 +210,7 @@ class FloatService : Service() {
 
     private fun setBallActive(active: Boolean) {
         (ball?.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (active) "#8096C8FF" else "#808A8A8A") // 激活时淡蓝，未激活灰
+            Color.parseColor(if (active) "#CC96C8FF" else "#CC808080") // 激活淡蓝 / 未激活灰
         )
     }
 
@@ -234,10 +227,7 @@ class FloatService : Service() {
                     val now = SystemClock.uptimeMillis()
                     if (now - lastTriggerTs >= COOLDOWN_MS) {
                         lastTriggerTs = now
-                        main.post {
-                            // 命中：执行切换
-                            doToggleOnce()
-                        }
+                        main.post { doToggleOnce() }
                     }
                 }
             } catch (t: Throwable) {
@@ -251,9 +241,9 @@ class FloatService : Service() {
         captureExec = null
     }
 
-    /** 执行一次“手势/三键”切换（与前面一致） */
+    /** 执行一次“手势/三键”切换 */
     private fun doToggleOnce() {
-        Toast.makeText(this, "检测到按钮，正在切换…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "检测到浅红按钮，正在切换…", Toast.LENGTH_SHORT).show()
         isThreeButtonEnabled { isThree ->
             val cmds = if (!isThree) {
                 listOf(
@@ -288,7 +278,7 @@ class FloatService : Service() {
         }
     }
 
-    /** screencap -p 获取整屏 PNG 字节（显式用 java.lang.Process） */
+    /** screencap -p 获取整屏 PNG 字节 */
     private fun captureScreenPng(): ByteArray? {
         if (!isCapturing) return null
 
@@ -321,7 +311,6 @@ class FloatService : Service() {
                     out.write(buf, 0, n)
                 }
             }
-
             try { jproc.waitFor(1500, TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
             out.toByteArray()
         } catch (t: Throwable) {
@@ -332,18 +321,16 @@ class FloatService : Service() {
         }
     }
 
-    /** 在右下角区域检测“浅红色按钮” */
+    /** 只匹配“浅红”，排除“大红” */
     private fun detectLightRedAtBottomRight(bmp: Bitmap): Boolean {
         val w = bmp.width
         val h = bmp.height
         if (w <= 0 || h <= 0) return false
 
-        // 只取右下角一个子区域
+        // 只取右下角区域
         val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
         val ry = (h * (1f - DETECT_REGION_RATIO)).toInt()
-        val rw = w - rx
-        val rh = h - ry
-        if (rw <= 0 || rh <= 0) return false
+        if (w - rx <= 0 || h - ry <= 0) return false
 
         var hit = 0
         var total = 0
@@ -355,16 +342,22 @@ class FloatService : Service() {
             while (x < w) {
                 val c = bmp.getPixel(x, y)
                 Color.colorToHSV(c, hsv)
-                val sat = hsv[1]
-                val valv = hsv[2]
-                val hue = hsv[0]            // 0..360
+                val hue = hsv[0]    // 0..360
+                val sat = hsv[1]    // 0..1
+                val valv = hsv[2]   // 0..1
 
-                // 认为是“红色附近”：hue 在 [0..20] 或 [340..360]
-                val redHue = (hue <= 20f || hue >= 340f)
-                // “浅”：亮度高 & 饱和度中等以上
-                if (redHue && sat >= 0.35f && valv >= 0.75f) {
-                    hit++
-                }
+                val isRedHue = (hue <= 20f || hue >= 340f)
+                // “浅红”：亮度高、饱和度中低，避免深红/大红（高饱和 + 低/中亮度）
+                val isLightRed =
+                    isRedHue &&
+                    valv >= 0.88f &&            // 很亮
+                    sat in 0.18f..0.55f         // 中低饱和
+                val isDeepRed =
+                    isRedHue &&
+                    (sat >= 0.60f || valv <= 0.80f) // 大红：高饱或偏暗
+
+                if (isLightRed && !isDeepRed) hit++
+
                 total++
                 x += SAMPLE_STEP
             }
@@ -374,11 +367,11 @@ class FloatService : Service() {
         if (total == 0) return false
         val ratio = hit.toFloat() / total
         val matched = ratio >= DETECT_HIT_RATIO
-        Log.d(TAG, "detect red: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
+        Log.d(TAG, "detect light-red: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
         return matched
     }
 
-    // Shell 执行（显式用 java.lang.Process）
+    // Shell 执行
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1

@@ -373,43 +373,45 @@ class FloatService : Service() {
         return matched
     }
 
-    /** 通用 shell 执行 */
+    // 替换原来的 execShell 方法
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
             var out = ""
             var err = ""
             try {
-                val proc: Process = if (newProcessMethod != null) {
-                    @Suppress("UNCHECKED_CAST")
-                    newProcessMethod!!.invoke(
-                        null,
-                        arrayOf("sh", "-c", cmd),
-                        null,
-                        null
-                    ) as Process
-                } else {
-                    Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-                }
-
+                val jproc: java.lang.Process =
+                    if (newProcessMethod != null) {
+                        @Suppress("UNCHECKED_CAST")
+                        newProcessMethod!!.invoke(
+                            null,
+                            arrayOf("sh", "-c", cmd),
+                            null,
+                            null
+                        ) as java.lang.Process
+                    } else {
+                        Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+                    }
+    
                 val sbOut = StringBuilder()
                 val sbErr = StringBuilder()
-                BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
+                BufferedReader(InputStreamReader(jproc.getInputStream())).use { r ->
                     var line: String?
                     while (true) {
                         line = r.readLine() ?: break
                         sbOut.appendLine(line)
                     }
                 }
-                BufferedReader(InputStreamReader(proc.errorStream)).use { r ->
+                BufferedReader(InputStreamReader(jproc.getErrorStream())).use { r ->
                     var line: String?
                     while (true) {
                         line = r.readLine() ?: break
                         sbErr.appendLine(line)
                     }
                 }
-                proc.waitFor()
-                code = proc.exitValue()
+    
+                jproc.waitFor()
+                code = jproc.exitValue()
                 out = sbOut.toString()
                 err = sbErr.toString()
             } catch (t: Throwable) {
@@ -422,6 +424,7 @@ class FloatService : Service() {
             main.post { cb(exit, stdout, stderr) }
         }
     }
+
 
     override fun onDestroy() {
         super.onDestroy()

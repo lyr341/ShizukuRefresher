@@ -14,7 +14,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.*
-import android.widget.ImageView
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import kotlin.math.abs
@@ -34,12 +34,16 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // 取屏与检测
+        // 取屏与检测（可按需微调）
         private const val CAPTURE_INTERVAL_MS = 700L
         private const val DETECT_REGION_RATIO = 0.22f
-        private const val DETECT_HIT_RATIO = 0.035f   // 命中像素比例阈值
+        private const val DETECT_HIT_RATIO = 0.035f   // 命中像素比例阈值（越小越敏感）
         private const val COOLDOWN_MS = 2500L
         private const val SAMPLE_STEP = 2
+
+        // 悬浮按钮交互
+        private const val CLICK_COOLDOWN_MS = 600L    // 连点冷却
+        private const val BALL_SIZE_DP = 80           // 按钮直径 dp
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -48,13 +52,15 @@ class FloatService : Service() {
 
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
-    private var ball: ImageView? = null
+    private var ball: FrameLayout? = null
     private var lastRawX = 0f
     private var lastRawY = 0f
     private var isDragging = false
+    private var touchSlop = 8  // 运行时初始化
 
     @Volatile private var isCapturing = false
     @Volatile private var lastTriggerTs = 0L
+    @Volatile private var lastClickTs = 0L
 
     // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
@@ -82,6 +88,7 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         try {
             startForegroundX()
             addBallX()
@@ -119,8 +126,8 @@ class FloatService : Service() {
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        // —— 关键：悬浮窗的宽高用固定像素，不要 WRAP_CONTENT —— 
-        val sizePx = (80 * resources.displayMetrics.density).toInt() // 80dp 大圆
+        // 关键：悬浮窗本身用固定像素，不要 WRAP_CONTENT
+        val sizePx = (BALL_SIZE_DP * resources.displayMetrics.density).toInt()
         val strokePx = (2 * resources.displayMetrics.density).toInt()
 
         params = WindowManager.LayoutParams(
@@ -137,18 +144,19 @@ class FloatService : Service() {
             y = 480
         }
 
-        // 圆形灰色按钮（实心灰 + 浅白描边），点击区域=整圆
-        ball = ImageView(this).apply {
+        // 纯圆形灰色按钮，整个圆即点击区域（用 FrameLayout 做容器）
+        ball = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#CC808080"))          // 实心灰（80%不透明）
-                setStroke(strokePx, Color.parseColor("#66FFFFFF"))// 浅白描边
+                setColor(Color.parseColor("#CC808080"))          // 实心灰（约 80% 不透明）
+                setStroke(strokePx, Color.parseColor("#66FFFFFF"))// 淡白描边
             }
-            // 不放中心小点，避免看起来像“小点”；用背景决定大小
-            setImageDrawable(null)
-
             isClickable = true
-            setOnClickListener { onBallClickedToggleCapture() }
+            isFocusable = false
 
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
@@ -156,26 +164,32 @@ class FloatService : Service() {
                         lastRawX = ev.rawX
                         lastRawY = ev.rawY
                         isDragging = false
+                        return@setOnTouchListener true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        val dx = ev.rawX - lastRawX
-                        val dy = ev.rawY - lastRawY
-                        if (!isDragging && (abs(dx) > 6 || abs(dy) > 6)) {
-                            isDragging = true
-                        }
-                        if (isDragging) {
-                            params?.let { p ->
-                                p.x += dx.toInt()
-                                p.y += dy.toInt()
-                                wm?.updateViewLayout(v, p)
-                                lastRawX = ev.rawX
-                                lastRawY = ev.rawY
+                        params?.let { p ->
+                            val dx = (ev.rawX - lastRawX).toInt()
+                            val dy = (ev.rawY - lastRawY).toInt()
+                            if (!isDragging && (dx * dx + dy * dy) > touchSlop * touchSlop) {
+                                isDragging = true
                             }
-                            return@setOnTouchListener true
+                            p.x += dx
+                            p.y += dy
+                            wm?.updateViewLayout(v, p)
+                            lastRawX = ev.rawX
+                            lastRawY = ev.rawY
                         }
+                        return@setOnTouchListener true
                     }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (isDragging) return@setOnTouchListener true
+                    MotionEvent.ACTION_UP -> {
+                        if (!isDragging) {
+                            val now = SystemClock.uptimeMillis()
+                            if (now - lastClickTs >= CLICK_COOLDOWN_MS) {
+                                lastClickTs = now
+                                onBallClickedToggleCapture()
+                            }
+                        }
+                        return@setOnTouchListener true
                     }
                 }
                 false
@@ -185,9 +199,14 @@ class FloatService : Service() {
         wm?.addView(ball, params)
     }
 
+    private fun setBallActive(active: Boolean) {
+        (ball?.background as? GradientDrawable)?.setColor(
+            Color.parseColor(if (active) "#CC96C8FF" else "#CC808080") // 激活淡蓝/未激活灰
+        )
+    }
+
     // 点击：开始/停止取屏识别
     private fun onBallClickedToggleCapture() {
-        if (isDragging) return
         if (!Shizuku.pingBinder()) {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
             return
@@ -206,12 +225,6 @@ class FloatService : Service() {
             Toast.makeText(this, "已停止取屏", Toast.LENGTH_SHORT).show()
             setBallActive(false)
         }
-    }
-
-    private fun setBallActive(active: Boolean) {
-        (ball?.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (active) "#CC96C8FF" else "#CC808080") // 激活淡蓝 / 未激活灰
-        )
     }
 
     private fun startCaptureLoop() {

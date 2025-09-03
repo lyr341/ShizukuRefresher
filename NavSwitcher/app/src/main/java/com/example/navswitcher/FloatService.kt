@@ -7,18 +7,22 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
-import android.os.*
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.*
+import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import kotlin.math.abs
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
-import java.lang.Math.abs
 import java.lang.reflect.Method
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -138,7 +142,7 @@ class FloatService : Service() {
                 shape = GradientDrawable.OVAL
                 setColor(Color.parseColor("#808A8A8A")) // 半透明灰
             }
-            // 中心放个小点，作为视觉反馈（可要可不要）
+            // 中心放个小点，作为视觉反馈
             setImageBitmap(makeDotBitmap((sizePx * 0.3f).toInt(), Color.WHITE))
             scaleType = ImageView.ScaleType.CENTER
 
@@ -247,10 +251,9 @@ class FloatService : Service() {
         captureExec = null
     }
 
-    /** 执行一次“手势/三键”切换（沿用你之前的逻辑） */
+    /** 执行一次“手势/三键”切换（与前面一致） */
     private fun doToggleOnce() {
         Toast.makeText(this, "检测到按钮，正在切换…", Toast.LENGTH_SHORT).show()
-        // 简化：尝试切到三键；若已是三键则切回手势
         isThreeButtonEnabled { isThree ->
             val cmds = if (!isThree) {
                 listOf(
@@ -285,10 +288,11 @@ class FloatService : Service() {
         }
     }
 
-    /** screencap -p 获取整屏 PNG 字节 */
+    /** screencap -p 获取整屏 PNG 字节（显式用 java.lang.Process） */
     private fun captureScreenPng(): ByteArray? {
         if (!isCapturing) return null
-        val proc: Process? = try {
+
+        val jproc: java.lang.Process? = try {
             if (newProcessMethod != null) {
                 @Suppress("UNCHECKED_CAST")
                 newProcessMethod!!.invoke(
@@ -296,7 +300,7 @@ class FloatService : Service() {
                     arrayOf("sh", "-c", "screencap -p"),
                     null,
                     null
-                ) as Process
+                ) as java.lang.Process
             } else {
                 Runtime.getRuntime().exec(arrayOf("sh", "-c", "screencap -p"))
             }
@@ -304,25 +308,27 @@ class FloatService : Service() {
             Log.e(TAG, "screencap spawn error", t)
             null
         }
-        proc ?: return null
+        jproc ?: return null
 
         return try {
-            // 读 stdout 全部 PNG
             val out = ByteArrayOutputStream(2 * 1024 * 1024)
             val buf = ByteArray(32 * 1024)
-            val ins = proc.inputStream
-            while (true) {
-                val n = ins.read(buf)
-                if (n <= 0) break
-                out.write(buf, 0, n)
+
+            jproc.inputStream.use { ins ->
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                }
             }
-            try { proc.waitFor(1500, TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
+
+            try { jproc.waitFor(1500, TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
             out.toByteArray()
         } catch (t: Throwable) {
             Log.e(TAG, "screencap read error", t)
             null
         } finally {
-            try { proc.destroy() } catch (_: Throwable) {}
+            try { jproc.destroy() } catch (_: Throwable) {}
         }
     }
 
@@ -341,7 +347,6 @@ class FloatService : Service() {
 
         var hit = 0
         var total = 0
-
         val hsv = FloatArray(3)
 
         var y = ry
@@ -373,7 +378,7 @@ class FloatService : Service() {
         return matched
     }
 
-    // 替换原来的 execShell 方法
+    // Shell 执行（显式用 java.lang.Process）
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
@@ -392,24 +397,25 @@ class FloatService : Service() {
                     } else {
                         Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
                     }
-    
+
                 val sbOut = StringBuilder()
                 val sbErr = StringBuilder()
-                BufferedReader(InputStreamReader(jproc.getInputStream())).use { r ->
+
+                BufferedReader(InputStreamReader(jproc.inputStream)).use { r ->
                     var line: String?
                     while (true) {
                         line = r.readLine() ?: break
                         sbOut.appendLine(line)
                     }
                 }
-                BufferedReader(InputStreamReader(jproc.getErrorStream())).use { r ->
+                BufferedReader(InputStreamReader(jproc.errorStream)).use { r ->
                     var line: String?
                     while (true) {
                         line = r.readLine() ?: break
                         sbErr.appendLine(line)
                     }
                 }
-    
+
                 jproc.waitFor()
                 code = jproc.exitValue()
                 out = sbOut.toString()
@@ -424,7 +430,6 @@ class FloatService : Service() {
             main.post { cb(exit, stdout, stderr) }
         }
     }
-
 
     override fun onDestroy() {
         super.onDestroy()

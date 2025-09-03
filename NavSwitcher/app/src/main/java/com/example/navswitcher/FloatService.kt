@@ -26,6 +26,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.roundToInt
+import java.lang.Process as JProcess   // ★ 关键：给 java.lang.Process 起别名，避免和 android.os.Process 冲突
 
 class FloatService : Service() {
 
@@ -36,39 +37,30 @@ class FloatService : Service() {
 
         // ---- 目标匹配配置（按你日志）----
         private const val GAME_PACKAGE = "cn.damai"
-        // 商场页 Activity 关键字（完全类名）
         private const val SHOP_ACTIVITY = "cn.damai.commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity"
 
-        // 只监听这些 tag（减少日志量）；也可以改成空，用全量 logcat 在代码中过滤
         private val LOG_TAGS = listOf(
-            "Transition",                // 有 state=RESUMED
-            "OplusScrollToTopManager",   // 有 focus to true
+            "Transition",
+            "OplusScrollToTopManager",
             "OplusAppSwitchManagerService",
-            "WindowManager"              // mCurrentFocus
+            "WindowManager"
         )
 
-        // 匹配“进入/前台”强信号；也可放宽为只匹配 NcovSkuActivity，再靠冷却+前台包限制
         private val REGEX_ENTER_SHOP = Regex(
             "NcovSkuActivity.*(RESUMED|focus to true|handleAppVisible|mCurrentFocus)|(RESUMED|handleAppVisible).*NcovSkuActivity",
             RegexOption.IGNORE_CASE
         )
 
-        // 触发去抖冷却时间
         private const val COOL_DOWN_MS = 1500L
-        // 拖拽判定最小位移(px)
         private const val DRAG_SLOP = 6
-        // 悬浮按钮直径(dp)
         private const val BALL_DP = 72f
-        // 颜色（灰色）
         private const val BALL_COLOR = 0xFF808080.toInt()
     }
 
-    // 主线程/IO线程
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private val bg: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
 
-    // 悬浮球
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var ball: ImageView? = null
@@ -78,14 +70,11 @@ class FloatService : Service() {
     private var touchStartY = 0f
     private var moved = false
 
-    // 切换保护
     @Volatile private var isSwitching = false
     @Volatile private var lastSwitchTs = 0L
 
-    // logcat 监控进程
-    @Volatile private var logcatProc: Process? = null
+    @Volatile private var logcatProc: JProcess? = null   // ★ 用 JProcess
 
-    // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
         try {
             Shizuku::class.java.getMethod(
@@ -170,10 +159,8 @@ class FloatService : Service() {
             y = 600
         }
 
-        // 圆形灰色背景
         val circle = ShapeDrawable(OvalShape()).apply {
             paint.color = BALL_COLOR
-            // 让可视区域即为点击区域
             setPadding(0, 0, 0, 0)
             intrinsicWidth = size
             intrinsicHeight = size
@@ -182,7 +169,6 @@ class FloatService : Service() {
         ball = ImageView(this).apply {
             background = circle
             scaleType = ImageView.ScaleType.CENTER
-            // 可按需加一个很淡的内图标；这里先不放，整块灰色都是点击区
 
             isClickable = true
             setOnClickListener { onBallClicked() }
@@ -214,7 +200,6 @@ class FloatService : Service() {
                         return@setOnTouchListener true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        // 如果发生了拖拽，则拦截点击，不触发切换
                         if (moved) return@setOnTouchListener true
                     }
                 }
@@ -229,7 +214,6 @@ class FloatService : Service() {
         tryToggleWithCooldown(reason = "manual_click")
     }
 
-    /** 统一的切换入口（带冷却&排他保护） */
     private fun tryToggleWithCooldown(reason: String) {
         val now = SystemClock.uptimeMillis()
         if (isSwitching || now - lastSwitchTs < COOL_DOWN_MS) {
@@ -297,14 +281,11 @@ class FloatService : Service() {
             Log.w(TAG, "auto monitor disabled: no Shizuku permission")
             return
         }
-        // 起一个后台任务跑 logcat 解析
         bg.execute { runLogcatWatcher() }
     }
 
     private fun runLogcatWatcher() {
         try {
-            // 构造 logcat 命令：只订阅关心的 tag，降低吞吐
-            // 例：logcat -v brief -T 1 Transition:I OplusScrollToTopManager:I OplusAppSwitchManagerService:I WindowManager:I *:S
             val args = mutableListOf("logcat", "-v", "brief", "-T", "1")
             LOG_TAGS.forEach { t -> args += "$t:I" }
             args += "*:S"
@@ -317,11 +298,9 @@ class FloatService : Service() {
                 while (true) {
                     line = r.readLine() ?: break
                     val l = line!!
-                    // 先包含 Activity 关键字，再用正则判定（减少 regex 次数）
                     if (!l.contains("NcovSkuActivity", ignoreCase = true)) continue
                     if (!REGEX_ENTER_SHOP.containsMatchIn(l)) continue
 
-                    // 二次确认：当前前台包是目标包
                     val fg = getTopPackageSync()
                     val ok = (fg == GAME_PACKAGE)
                     Log.d(TAG, "logcat hit, line='$l', top=$fg, ok=$ok")
@@ -333,29 +312,25 @@ class FloatService : Service() {
         } catch (t: Throwable) {
             Log.e(TAG, "runLogcatWatcher error", t)
         } finally {
-            logcatProc?.destroyForcibly()
+            try { logcatProc?.destroyForcibly() } catch (_: Throwable) {} // ★ JProcess 方法
             logcatProc = null
         }
     }
 
-    /** 同步拿前台包名（简化实现） */
     private fun getTopPackageSync(): String? {
         val cmd = "dumpsys activity top | grep 'ACTIVITY' | head -n 1"
         val (code, out, _) = execShellSync(cmd)
         if (code != 0) return null
-        // 典型行： ACTIVITY cn.damai/.commonbusiness... pid ...
         val parts = out.lineSequence().firstOrNull()?.trim() ?: return null
-        // 粗提取：第2段为包/类
         val tokens = parts.split(Regex("\\s+"))
-        // 找到类似 cn.damai/xxx 的段
         val seg = tokens.firstOrNull { it.contains("/") } ?: return null
         return seg.substringBefore("/")
     }
 
-    // ---------- Shell 执行（Shizuku 反射优先） ----------
-    private fun startProcess(argv: Array<String>): Process {
-        val proc: Process? = try {
-            newProcessMethod?.invoke(null, argv, null, null) as? Process
+    // ---------- Shell 执行 ----------
+    private fun startProcess(argv: Array<String>): JProcess {          // ★ 返回 JProcess
+        val proc: JProcess? = try {
+            newProcessMethod?.invoke(null, argv, null, null) as? JProcess
         } catch (t: Throwable) {
             Log.w(TAG, "startProcess: reflection failed, fallback Runtime.exec", t)
             null
@@ -385,14 +360,14 @@ class FloatService : Service() {
                     sbOut.appendLine(line)
                 }
             }
-            BufferedReader(InputStreamReader(proc.errorStream)).use { r ->
+            BufferedReader(InputStreamReader(proc.errorStream)).use { r ->   // ★ errorStream OK
                 var line: String?
                 while (true) {
                     line = r.readLine() ?: break
                     sbErr.appendLine(line)
                 }
             }
-            code = proc.waitFor()
+            code = proc.waitFor()   // ★ waitFor OK
             out = sbOut.toString()
             err = sbErr.toString()
         } catch (t: Throwable) {
@@ -402,13 +377,12 @@ class FloatService : Service() {
         return Triple(code, out, err)
     }
 
-    // ---------- 生命周期 ----------
     override fun onDestroy() {
         super.onDestroy()
         try { wm?.removeView(ball) } catch (_: Throwable) {}
         wm = null; ball = null; params = null
 
-        try { logcatProc?.destroyForcibly() } catch (_: Throwable) {}
+        try { logcatProc?.destroyForcibly() } catch (_: Throwable) {}  // ★ destroyForcibly OK
         logcatProc = null
 
         io.shutdownNow()

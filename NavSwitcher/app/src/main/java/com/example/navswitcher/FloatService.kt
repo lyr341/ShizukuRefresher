@@ -5,28 +5,24 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.PixelFormat
-import android.graphics.drawable.ShapeDrawable
-import android.graphics.drawable.shapes.OvalShape
+import android.graphics.*
+import android.graphics.drawable.GradientDrawable
 import android.os.*
 import android.provider.Settings
 import android.util.Log
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.WindowManager
+import android.view.*
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
+import java.lang.Math.abs
 import java.lang.reflect.Method
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
-import kotlin.math.max
-import kotlin.math.roundToInt
-import java.lang.Process as JProcess   // ★ 关键：给 java.lang.Process 起别名，避免和 android.os.Process 冲突
 
 class FloatService : Service() {
 
@@ -35,46 +31,29 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // ---- 目标匹配配置（按你日志）----
-        private const val GAME_PACKAGE = "cn.damai"
-        private const val SHOP_ACTIVITY = "cn.damai.commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity"
-
-        private val LOG_TAGS = listOf(
-            "Transition",
-            "OplusScrollToTopManager",
-            "OplusAppSwitchManagerService",
-            "WindowManager"
-        )
-
-        private val REGEX_ENTER_SHOP = Regex(
-            "NcovSkuActivity.*(RESUMED|focus to true|handleAppVisible|mCurrentFocus)|(RESUMED|handleAppVisible).*NcovSkuActivity",
-            RegexOption.IGNORE_CASE
-        )
-
-        private const val COOL_DOWN_MS = 1500L
-        private const val DRAG_SLOP = 6
-        private const val BALL_DP = 72f
-        private const val BALL_COLOR = 0xFF808080.toInt()
+        // 取屏与检测的节奏/阈值
+        private const val CAPTURE_INTERVAL_MS = 800L
+        private const val DETECT_REGION_RATIO = 0.22f     // 右下角取 22%×22% 区域
+        private const val DETECT_HIT_RATIO = 0.06f        // 命中像素比例阈值 6%
+        private const val COOLDOWN_MS = 2500L             // 自动切换冷却 2.5s
+        private const val SAMPLE_STEP = 3                 // 像素采样步长（越大越省电）
     }
 
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
-    private val bg: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private var captureExec: ScheduledExecutorService? = null
 
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var ball: ImageView? = null
     private var lastRawX = 0f
     private var lastRawY = 0f
-    private var touchStartX = 0f
-    private var touchStartY = 0f
-    private var moved = false
+    private var isDragging = false
 
-    @Volatile private var isSwitching = false
-    @Volatile private var lastSwitchTs = 0L
+    @Volatile private var isCapturing = false
+    @Volatile private var lastTriggerTs = 0L
 
-    @Volatile private var logcatProc: JProcess? = null   // ★ 用 JProcess
-
+    // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
         try {
             Shizuku::class.java.getMethod(
@@ -103,8 +82,7 @@ class FloatService : Service() {
         try {
             startForegroundX()
             addBallX()
-            startAutoMonitorIfPossible()
-            Log.d(TAG, "onCreate OK, ball added & monitor started")
+            Log.d(TAG, "onCreate OK, ball added")
             Toast.makeText(this, "悬浮球服务已启动", Toast.LENGTH_SHORT).show()
         } catch (t: Throwable) {
             Log.e(TAG, "onCreate error", t)
@@ -121,15 +99,10 @@ class FloatService : Service() {
         }
         val noti = NotificationCompat.Builder(this, CH_ID)
             .setContentTitle("悬浮球已启用")
-            .setContentText("点击切换 / 自动识别界面切换")
+            .setContentText("点击开始/停止取屏识别")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .build()
         startForeground(NOTI_ID, noti)
-    }
-
-    private fun dp2px(dp: Float): Int {
-        val d = resources.displayMetrics.density
-        return max(1f, dp * d).roundToInt()
     }
 
     private fun addBallX() {
@@ -143,11 +116,9 @@ class FloatService : Service() {
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        val size = dp2px(BALL_DP)
-
         params = WindowManager.LayoutParams(
-            size,
-            size,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -155,52 +126,51 @@ class FloatService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.START or Gravity.TOP
-            x = 200
-            y = 600
+            x = 180
+            y = 520
         }
 
-        val circle = ShapeDrawable(OvalShape()).apply {
-            paint.color = BALL_COLOR
-            setPadding(0, 0, 0, 0)
-            intrinsicWidth = size
-            intrinsicHeight = size
-        }
-
+        // 圆形灰色按钮（点击区域即圆）
+        val sizePx = (56 * resources.displayMetrics.density).toInt() // ~56dp
         ball = ImageView(this).apply {
-            background = circle
+            layoutParams = ViewGroup.LayoutParams(sizePx, sizePx)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#808A8A8A")) // 半透明灰
+            }
+            // 中心放个小点，作为视觉反馈（可要可不要）
+            setImageBitmap(makeDotBitmap((sizePx * 0.3f).toInt(), Color.WHITE))
             scaleType = ImageView.ScaleType.CENTER
 
             isClickable = true
-            setOnClickListener { onBallClicked() }
+            setOnClickListener { onBallClickedToggleCapture() }
 
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         lastRawX = ev.rawX
                         lastRawY = ev.rawY
-                        touchStartX = ev.rawX
-                        touchStartY = ev.rawY
-                        moved = false
+                        isDragging = false
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        val dxF = ev.rawX - lastRawX
-                        val dyF = ev.rawY - lastRawY
-                        val mdx = ev.rawX - touchStartX
-                        val mdy = ev.rawY - touchStartY
-                        if (!moved && (kotlin.math.abs(mdx) > DRAG_SLOP || kotlin.math.abs(mdy) > DRAG_SLOP)) {
-                            moved = true
+                        val dx = ev.rawX - lastRawX
+                        val dy = ev.rawY - lastRawY
+                        if (!isDragging && (abs(dx) > 6 || abs(dy) > 6)) {
+                            isDragging = true
                         }
-                        params?.let { p ->
-                            p.x += dxF.toInt()
-                            p.y += dyF.toInt()
-                            wm?.updateViewLayout(v, p)
-                            lastRawX = ev.rawX
-                            lastRawY = ev.rawY
+                        if (isDragging) {
+                            params?.let { p ->
+                                p.x += dx.toInt()
+                                p.y += dy.toInt()
+                                wm?.updateViewLayout(v, p)
+                                lastRawX = ev.rawX
+                                lastRawY = ev.rawY
+                            }
+                            return@setOnTouchListener true
                         }
-                        return@setOnTouchListener true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        if (moved) return@setOnTouchListener true
+                        if (isDragging) return@setOnTouchListener true // 拖拽不当点击
                     }
                 }
                 false
@@ -210,16 +180,17 @@ class FloatService : Service() {
         wm?.addView(ball, params)
     }
 
-    private fun onBallClicked() {
-        tryToggleWithCooldown(reason = "manual_click")
+    private fun makeDotBitmap(diameter: Int, color: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(diameter, diameter, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
+        c.drawCircle(diameter / 2f, diameter / 2f, diameter / 2f, p)
+        return bmp
     }
 
-    private fun tryToggleWithCooldown(reason: String) {
-        val now = SystemClock.uptimeMillis()
-        if (isSwitching || now - lastSwitchTs < COOL_DOWN_MS) {
-            Log.d(TAG, "skip toggle: cooling/switching, reason=$reason")
-            return
-        }
+    // 点击：开始/停止取屏识别
+    private fun onBallClickedToggleCapture() {
+        if (isDragging) return
         if (!Shizuku.pingBinder()) {
             Toast.makeText(this, "Shizuku 未运行", Toast.LENGTH_LONG).show()
             return
@@ -228,10 +199,58 @@ class FloatService : Service() {
             Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             return
         }
+        isCapturing = !isCapturing
+        if (isCapturing) {
+            startCaptureLoop()
+            Toast.makeText(this, "开始取屏识别", Toast.LENGTH_SHORT).show()
+            setBallActive(true)
+        } else {
+            stopCaptureLoop()
+            Toast.makeText(this, "已停止取屏", Toast.LENGTH_SHORT).show()
+            setBallActive(false)
+        }
+    }
 
-        isSwitching = true
-        Toast.makeText(this, "准备切换…", Toast.LENGTH_SHORT).show()
+    private fun setBallActive(active: Boolean) {
+        (ball?.background as? GradientDrawable)?.setColor(
+            Color.parseColor(if (active) "#8096C8FF" else "#808A8A8A") // 激活时淡蓝，未激活灰
+        )
+    }
 
+    private fun startCaptureLoop() {
+        if (captureExec != null) return
+        captureExec = Executors.newSingleThreadScheduledExecutor()
+        captureExec?.scheduleAtFixedRate({
+            try {
+                val png = captureScreenPng() ?: return@scheduleAtFixedRate
+                val bmp = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return@scheduleAtFixedRate
+                val hit = detectLightRedAtBottomRight(bmp)
+                bmp.recycle()
+                if (hit) {
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastTriggerTs >= COOLDOWN_MS) {
+                        lastTriggerTs = now
+                        main.post {
+                            // 命中：执行切换
+                            doToggleOnce()
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "capture/detect error", t)
+            }
+        }, 0, CAPTURE_INTERVAL_MS, TimeUnit.MILLISECONDS)
+    }
+
+    private fun stopCaptureLoop() {
+        captureExec?.shutdownNow()
+        captureExec = null
+    }
+
+    /** 执行一次“手势/三键”切换（沿用你之前的逻辑） */
+    private fun doToggleOnce() {
+        Toast.makeText(this, "检测到按钮，正在切换…", Toast.LENGTH_SHORT).show()
+        // 简化：尝试切到三键；若已是三键则切回手势
         isThreeButtonEnabled { isThree ->
             val cmds = if (!isThree) {
                 listOf(
@@ -246,17 +265,12 @@ class FloatService : Service() {
                     "cmd statusbar restart"
                 )
             }
-
             execShell(cmds.joinToString(" && ")) { code, out, err ->
-                Log.d(TAG, "toggle($reason) exit=$code\nstdout=$out\nstderr=$err")
-                main.post {
-                    isSwitching = false
-                    lastSwitchTs = SystemClock.uptimeMillis()
-                    if (code == 0) {
-                        Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
-                    }
+                Log.d(TAG, "toggle exit=$code\nstdout=$out\nstderr=$err")
+                if (code == 0) {
+                    Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -271,122 +285,150 @@ class FloatService : Service() {
         }
     }
 
-    // ---------- 自动识别并触发 ----------
-    private fun startAutoMonitorIfPossible() {
-        if (!Shizuku.pingBinder()) {
-            Log.w(TAG, "auto monitor disabled: Shizuku not running")
-            return
-        }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "auto monitor disabled: no Shizuku permission")
-            return
-        }
-        bg.execute { runLogcatWatcher() }
-    }
-
-    private fun runLogcatWatcher() {
-        try {
-            val args = mutableListOf("logcat", "-v", "brief", "-T", "1")
-            LOG_TAGS.forEach { t -> args += "$t:I" }
-            args += "*:S"
-
-            val proc = startProcess(args.toTypedArray())
-            logcatProc = proc
-
-            BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
-                var line: String?
-                while (true) {
-                    line = r.readLine() ?: break
-                    val l = line!!
-                    if (!l.contains("NcovSkuActivity", ignoreCase = true)) continue
-                    if (!REGEX_ENTER_SHOP.containsMatchIn(l)) continue
-
-                    val fg = getTopPackageSync()
-                    val ok = (fg == GAME_PACKAGE)
-                    Log.d(TAG, "logcat hit, line='$l', top=$fg, ok=$ok")
-                    if (ok) {
-                        tryToggleWithCooldown(reason = "logcat:$SHOP_ACTIVITY")
-                    }
-                }
+    /** screencap -p 获取整屏 PNG 字节 */
+    private fun captureScreenPng(): ByteArray? {
+        if (!isCapturing) return null
+        val proc: Process? = try {
+            if (newProcessMethod != null) {
+                @Suppress("UNCHECKED_CAST")
+                newProcessMethod!!.invoke(
+                    null,
+                    arrayOf("sh", "-c", "screencap -p"),
+                    null,
+                    null
+                ) as Process
+            } else {
+                Runtime.getRuntime().exec(arrayOf("sh", "-c", "screencap -p"))
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "runLogcatWatcher error", t)
-        } finally {
-            try { logcatProc?.destroyForcibly() } catch (_: Throwable) {} // ★ JProcess 方法
-            logcatProc = null
-        }
-    }
-
-    private fun getTopPackageSync(): String? {
-        val cmd = "dumpsys activity top | grep 'ACTIVITY' | head -n 1"
-        val (code, out, _) = execShellSync(cmd)
-        if (code != 0) return null
-        val parts = out.lineSequence().firstOrNull()?.trim() ?: return null
-        val tokens = parts.split(Regex("\\s+"))
-        val seg = tokens.firstOrNull { it.contains("/") } ?: return null
-        return seg.substringBefore("/")
-    }
-
-    // ---------- Shell 执行 ----------
-    private fun startProcess(argv: Array<String>): JProcess {          // ★ 返回 JProcess
-        val proc: JProcess? = try {
-            newProcessMethod?.invoke(null, argv, null, null) as? JProcess
-        } catch (t: Throwable) {
-            Log.w(TAG, "startProcess: reflection failed, fallback Runtime.exec", t)
+            Log.e(TAG, "screencap spawn error", t)
             null
         }
-        return proc ?: Runtime.getRuntime().exec(argv)
+        proc ?: return null
+
+        return try {
+            // 读 stdout 全部 PNG
+            val out = ByteArrayOutputStream(2 * 1024 * 1024)
+            val buf = ByteArray(32 * 1024)
+            val ins = proc.inputStream
+            while (true) {
+                val n = ins.read(buf)
+                if (n <= 0) break
+                out.write(buf, 0, n)
+            }
+            try { proc.waitFor(1500, TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
+            out.toByteArray()
+        } catch (t: Throwable) {
+            Log.e(TAG, "screencap read error", t)
+            null
+        } finally {
+            try { proc.destroy() } catch (_: Throwable) {}
+        }
     }
 
+    /** 在右下角区域检测“浅红色按钮” */
+    private fun detectLightRedAtBottomRight(bmp: Bitmap): Boolean {
+        val w = bmp.width
+        val h = bmp.height
+        if (w <= 0 || h <= 0) return false
+
+        // 只取右下角一个子区域
+        val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
+        val ry = (h * (1f - DETECT_REGION_RATIO)).toInt()
+        val rw = w - rx
+        val rh = h - ry
+        if (rw <= 0 || rh <= 0) return false
+
+        var hit = 0
+        var total = 0
+
+        val hsv = FloatArray(3)
+
+        var y = ry
+        while (y < h) {
+            var x = rx
+            while (x < w) {
+                val c = bmp.getPixel(x, y)
+                Color.colorToHSV(c, hsv)
+                val sat = hsv[1]
+                val valv = hsv[2]
+                val hue = hsv[0]            // 0..360
+
+                // 认为是“红色附近”：hue 在 [0..20] 或 [340..360]
+                val redHue = (hue <= 20f || hue >= 340f)
+                // “浅”：亮度高 & 饱和度中等以上
+                if (redHue && sat >= 0.35f && valv >= 0.75f) {
+                    hit++
+                }
+                total++
+                x += SAMPLE_STEP
+            }
+            y += SAMPLE_STEP
+        }
+
+        if (total == 0) return false
+        val ratio = hit.toFloat() / total
+        val matched = ratio >= DETECT_HIT_RATIO
+        Log.d(TAG, "detect red: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
+        return matched
+    }
+
+    /** 通用 shell 执行 */
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
-            val (code, out, err) = execShellSync(cmd)
-            main.post { cb(code, out, err) }
-        }
-    }
+            var code = -1
+            var out = ""
+            var err = ""
+            try {
+                val proc: Process = if (newProcessMethod != null) {
+                    @Suppress("UNCHECKED_CAST")
+                    newProcessMethod!!.invoke(
+                        null,
+                        arrayOf("sh", "-c", cmd),
+                        null,
+                        null
+                    ) as Process
+                } else {
+                    Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+                }
 
-    private fun execShellSync(cmd: String): Triple<Int, String, String> {
-        var code = -1
-        var out = ""
-        var err = ""
-        try {
-            val proc = startProcess(arrayOf("sh", "-c", cmd))
-            val sbOut = StringBuilder()
-            val sbErr = StringBuilder()
-            BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
-                var line: String?
-                while (true) {
-                    line = r.readLine() ?: break
-                    sbOut.appendLine(line)
+                val sbOut = StringBuilder()
+                val sbErr = StringBuilder()
+                BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
+                    var line: String?
+                    while (true) {
+                        line = r.readLine() ?: break
+                        sbOut.appendLine(line)
+                    }
                 }
-            }
-            BufferedReader(InputStreamReader(proc.errorStream)).use { r ->   // ★ errorStream OK
-                var line: String?
-                while (true) {
-                    line = r.readLine() ?: break
-                    sbErr.appendLine(line)
+                BufferedReader(InputStreamReader(proc.errorStream)).use { r ->
+                    var line: String?
+                    while (true) {
+                        line = r.readLine() ?: break
+                        sbErr.appendLine(line)
+                    }
                 }
+                proc.waitFor()
+                code = proc.exitValue()
+                out = sbOut.toString()
+                err = sbErr.toString()
+            } catch (t: Throwable) {
+                err = t.message ?: t.toString()
+                Log.e(TAG, "execShell error", t)
             }
-            code = proc.waitFor()   // ★ waitFor OK
-            out = sbOut.toString()
-            err = sbErr.toString()
-        } catch (t: Throwable) {
-            err = t.message ?: t.toString()
-            Log.e(TAG, "execShellSync error", t)
+            val stdout = out
+            val stderr = err
+            val exit = code
+            main.post { cb(exit, stdout, stderr) }
         }
-        return Triple(code, out, err)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         try { wm?.removeView(ball) } catch (_: Throwable) {}
         wm = null; ball = null; params = null
-
-        try { logcatProc?.destroyForcibly() } catch (_: Throwable) {}  // ★ destroyForcibly OK
-        logcatProc = null
-
+        stopCaptureLoop()
         io.shutdownNow()
-        bg.shutdownNow()
     }
 
     override fun onBind(intent: Intent?) = null

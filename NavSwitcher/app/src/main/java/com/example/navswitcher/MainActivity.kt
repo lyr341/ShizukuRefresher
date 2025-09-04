@@ -23,9 +23,7 @@ class MainActivity : AppCompatActivity() {
     private val shizukuPermReqCode: Int = 10086
 
     private val reqPostNotification: ActivityResultLauncher<String> =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _: Boolean ->
-            // 不论是否同意通知权限，都不拦主流程
-        }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _: Boolean -> }
 
     private val reqOverlay: ActivityResultLauncher<Intent> =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { _: ActivityResult ->
@@ -40,89 +38,57 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 简单的纵向布局
+        // 垂直布局容器
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val pad = (16 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
+            setPadding(32, 32, 32, 32)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
 
-        fun makeBtn(textStr: String, onClick: () -> Unit) = Button(this).apply {
-            text = textStr
-            val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            lp.topMargin = (12 * resources.displayMetrics.density).toInt()
-            layoutParams = lp
-            setOnClickListener { onClick() }
+        fun addBtn(textStr: String, onClick: () -> Unit) {
+            val b = Button(this).apply {
+                text = textStr
+                setOnClickListener { onClick() }
+            }
+            root.addView(b, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 24 })
         }
 
-        // 1) 开启/重启悬浮球
-        root.addView(makeBtn("开启悬浮球") {
-            ensureAndStart()
-        })
+        // 1) 开启/重启悬浮球（并不强制显示）
+        addBtn("开启悬浮球") { ensureAndStart() }
 
-        // 2) 截图频率 100ms
-        root.addView(makeBtn("截图频率 100ms") {
-            ensureAndStart()
-            sendSetInterval(100L)
-        })
+        // 2) 频率按钮：100ms / 200ms / 300ms
+        addBtn("截图频率 100ms") { sendSetInterval(100L) }
+        addBtn("截图频率 200ms") { sendSetInterval(200L) }
+        addBtn("截图频率 300ms") { sendSetInterval(300L) }
 
-        // 3) 截图频率 200ms
-        root.addView(makeBtn("截图频率 200ms") {
-            ensureAndStart()
-            sendSetInterval(200L)
-        })
-
-        // 4) 截图频率 300ms
-        root.addView(makeBtn("截图频率 300ms") {
-            ensureAndStart()
-            sendSetInterval(300L)
-        })
-
-        // 5) 隐藏悬浮球
-        root.addView(makeBtn("隐藏悬浮球") {
-            ensureAndStart()
-            val it = Intent(this, FloatService::class.java).apply {
-                action = FloatService.ACTION_HIDE_BALL
-            }
-            startServiceCompat(it)
-        })
-
-        // 6) 显示悬浮球
-        root.addView(makeBtn("显示悬浮球") {
-            ensureAndStart()
-            val it = Intent(this, FloatService::class.java).apply {
-                action = FloatService.ACTION_SHOW_BALL
-            }
-            startServiceCompat(it)
-        })
+        // 3) 显示/隐藏悬浮球
+        addBtn("隐藏悬浮球") { sendAction(FloatService.ACTION_HIDE_BALL) }
+        addBtn("显示悬浮球") { sendAction(FloatService.ACTION_SHOW_BALL) }
 
         setContentView(root)
 
         // 显式初始化监听器
         shizukuPermListener = Shizuku.OnRequestPermissionResultListener { _: Int, grantResult: Int ->
             if (grantResult == PackageManager.PERMISSION_GRANTED) {
-                startFloatService() // 权限到手后拉起服务
+                startFloatService()
             } else {
                 Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             }
             Shizuku.removeRequestPermissionResultListener(shizukuPermListener)
         }
 
-        // Android 13+ 请求通知权限（前台服务通知用）
         if (Build.VERSION.SDK_INT >= 33) {
             reqPostNotification.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
     private fun ensureAndStart() {
-        // 1) 悬浮窗权限
         if (!Settings.canDrawOverlays(this)) {
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -131,7 +97,6 @@ class MainActivity : AppCompatActivity() {
             reqOverlay.launch(intent)
             return
         }
-        // 2) Shizuku 权限
         maybeRequestShizukuAndStart()
     }
 
@@ -148,26 +113,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startFloatService() 
-    {
-        val it = Intent(this, FloatService::class.java)
-        startServiceCompat(it)
+    private fun startFloatService() {
+        try {
+            val it = Intent(this, FloatService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(it) else startService(it)
+            Toast.makeText(this, "已请求启动悬浮球服务", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Toast.makeText(this, "启动服务异常: ${t.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun sendAction(action: String) {
+        val it = Intent(this, FloatService::class.java).setAction(action)
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(it) else startService(it)
+        } catch (_: Throwable) { startService(it) }
     }
 
     private fun sendSetInterval(ms: Long) {
-        val it = Intent(this, FloatService::class.java).apply {
-            action = FloatService.ACTION_SET_INTERVAL
-            putExtra(FloatService.EXTRA_INTERVAL_MS, ms)
-        }
-        startServiceCompat(it)
-        Toast.makeText(this, "已设置截图频率为 ${ms}ms", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun startServiceCompat(intent: Intent) {
-        if (Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        val it = Intent(this, FloatService::class.java)
+            .setAction(FloatService.ACTION_SET_INTERVAL)
+            .putExtra(FloatService.EXTRA_INTERVAL_MS, ms)
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(it) else startService(it)
+            Toast.makeText(this, "已发送频率 ${ms}ms", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Toast.makeText(this, "设置频率失败: ${t.message}", Toast.LENGTH_LONG).show()
         }
     }
 }

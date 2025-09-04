@@ -148,14 +148,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startFloatService() {
-        try {
-            val it = Intent(this, FloatService::class.java)
-            startServiceCompat(it)
-            Toast.makeText(this, "已请求启动悬浮球服务", Toast.LENGTH_SHORT).show()
-        } catch (t: Throwable) {
-            Toast.makeText(this, "启动服务异常: ${t.message}", Toast.LENGTH_LONG).show()
-        }
+    private fun startFloatService() 
+    {
+        val it = Intent(this, FloatService::class.java)
+        startServiceCompat(it)
     }
 
     private fun sendSetInterval(ms: Long) {

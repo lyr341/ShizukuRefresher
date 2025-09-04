@@ -5,7 +5,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.*
 import android.provider.Settings
@@ -31,40 +34,33 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // 外部控制 Action/Extra（MainActivity 会用到）
-        const val ACTION_SET_INTERVAL = "com.example.navswitcher.SET_INTERVAL"
-        const val ACTION_HIDE_BALL   = "com.example.navswitcher.HIDE_BALL"
-        const val ACTION_SHOW_BALL   = "com.example.navswitcher.SHOW_BALL"
-        const val EXTRA_INTERVAL_MS  = "interval_ms"
+        // 截屏循环与检测参数
+        private const val CAPTURE_INTERVAL_MS = 200L      // 取屏频率：可改 100/200/300
+        private const val DETECT_REGION_RATIO = 0.22f     // 右下/右上角各取 22%×22% 区域
+        private const val DETECT_HIT_RATIO = 0.06f        // 命中像素比例阈值（越低越敏感）
+        private const val COOLDOWN_MS = 600L             // 自动切换冷却 2.5s
+        private const val SAMPLE_STEP = 3                 // 像素采样步长（越大越省电）
 
-        // 取屏与检测参数（可通过 ACTION_SET_INTERVAL 动态改频率）
-        private const val DEFAULT_CAPTURE_INTERVAL_MS = 800L
-        private const val DETECT_REGION_RATIO = 0.22f   // 右下角 22% × 22%
-        private const val DETECT_HIT_RATIO = 0.06f      // 命中像素比例阈值 6%
-        private const val SAMPLE_STEP = 3               // 采样步长
-        private const val AUTO_COOLDOWN_MS = 2500L      // 自动切换冷却
-        private const val CLICK_COOLDOWN_MS = 350L      // 点击防抖
+        // 点击冷却，防止连点
+        private const val CLICK_COOLDOWN_MS = 600L
     }
 
-    // 主/IO 线程
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var captureExec: ScheduledExecutorService? = null
 
-    // 悬浮按钮相关
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var ball: FrameLayout? = null
-    private var touchSlop: Int = 12
+
     private var lastRawX = 0f
     private var lastRawY = 0f
     private var isDragging = false
     private var lastClickTs = 0L
+    private val touchSlop by lazy { ViewConfiguration.get(this).scaledTouchSlop }
 
-    // 识别状态
     @Volatile private var isCapturing = false
     @Volatile private var lastTriggerTs = 0L
-    private var captureIntervalMs: Long = DEFAULT_CAPTURE_INTERVAL_MS
 
     // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
@@ -104,29 +100,6 @@ class FloatService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_SET_INTERVAL -> {
-                val ms = intent.getLongExtra(EXTRA_INTERVAL_MS, captureIntervalMs)
-                captureIntervalMs = ms.coerceIn(50L, 5000L)
-                if (isCapturing) {
-                    stopCaptureLoop()
-                    startCaptureLoop()
-                }
-                Toast.makeText(this, "截图频率已设为 ${captureIntervalMs}ms", Toast.LENGTH_SHORT).show()
-            }
-            ACTION_HIDE_BALL -> {
-                ball?.visibility = View.GONE
-                Toast.makeText(this, "已隐藏悬浮球", Toast.LENGTH_SHORT).show()
-            }
-            ACTION_SHOW_BALL -> {
-                ball?.visibility = View.VISIBLE
-                Toast.makeText(this, "已显示悬浮球", Toast.LENGTH_SHORT).show()
-            }
-        }
-        return START_STICKY
-    }
-
     private fun startForegroundX() {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
@@ -146,17 +119,15 @@ class FloatService : Service() {
             throw IllegalStateException("未授予悬浮窗权限")
         }
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        touchSlop = ViewConfiguration.get(this).scaledTouchSlop
 
         val type = if (Build.VERSION.SDK_INT >= 26)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        val sizePx = (56 * resources.displayMetrics.density).toInt() // ≈56dp 的大圆
         params = WindowManager.LayoutParams(
-            sizePx,
-            sizePx,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -168,15 +139,13 @@ class FloatService : Service() {
             y = 520
         }
 
-        // 纯圆形灰色按钮，整个圆即点击区域
+        // —— 大圆形灰色按钮（圆即点击区域）——
+        val sizePx = (56 * resources.displayMetrics.density).toInt()  // ≈ 56dp
         ball = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(sizePx, sizePx)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#808A8A8A")) // 半透明灰
+                setColor(Color.GRAY) // 灰色圆
             }
             isClickable = true
             isFocusable = false
@@ -199,9 +168,9 @@ class FloatService : Service() {
                             p.x += dx
                             p.y += dy
                             wm?.updateViewLayout(v, p)
-                            lastRawX = ev.rawX
-                            lastRawY = ev.rawY
                         }
+                        lastRawX = ev.rawX
+                        lastRawY = ev.rawY
                         return@setOnTouchListener true
                     }
                     MotionEvent.ACTION_UP -> {
@@ -246,10 +215,11 @@ class FloatService : Service() {
 
     private fun setBallActive(active: Boolean) {
         (ball?.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (active) "#8096C8FF" else "#808A8A8A") // 激活淡蓝，未激活灰
+            if (active) Color.parseColor("#8096C8FF") else Color.GRAY // 激活时淡蓝
         )
     }
 
+    /** 开始定时取屏并检测：右下粉红 && 右上蓝色 -> 触发切换（带冷却） */
     private fun startCaptureLoop() {
         if (captureExec != null) return
         captureExec = Executors.newSingleThreadScheduledExecutor()
@@ -257,11 +227,14 @@ class FloatService : Service() {
             try {
                 val png = captureScreenPng() ?: return@scheduleAtFixedRate
                 val bmp = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return@scheduleAtFixedRate
-                val hit = detectPinkAtBottomRight(bmp)
+
+                val pinkBR = detectPinkAtBottomRight(bmp)
+                val blueTR = detectBlueAtTopRight(bmp)
                 bmp.recycle()
-                if (hit) {
+
+                if (pinkBR && blueTR) {
                     val now = SystemClock.uptimeMillis()
-                    if (now - lastTriggerTs >= AUTO_COOLDOWN_MS) {
+                    if (now - lastTriggerTs >= COOLDOWN_MS) {
                         lastTriggerTs = now
                         main.post { doToggleOnce() }
                     }
@@ -269,7 +242,7 @@ class FloatService : Service() {
             } catch (t: Throwable) {
                 Log.e(TAG, "capture/detect error", t)
             }
-        }, 0, captureIntervalMs, TimeUnit.MILLISECONDS)
+        }, 0, CAPTURE_INTERVAL_MS, TimeUnit.MILLISECONDS)
     }
 
     private fun stopCaptureLoop() {
@@ -277,30 +250,22 @@ class FloatService : Service() {
         captureExec = null
     }
 
-    /** 执行一次“手势/三键”切换 */
+    /** 执行一次“手势/三键”切换（与之前逻辑一致） */
     private fun doToggleOnce() {
-        Toast.makeText(this, "检测到浅红按钮，正在切换…", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "检测到", Toast.LENGTH_SHORT).show()
         isThreeButtonEnabled { isThree ->
             val cmds = if (!isThree) {
                 listOf(
                     "cmd overlay enable com.android.internal.systemui.navbar.threebutton",
-                    "cmd overlay disable com.android.internal.systemui.navbar.gestural",
-                    "cmd statusbar restart"
+                    "cmd overlay disable com.android.internal.systemui.navbar.gestural"
                 )
             } else {
                 listOf(
                     "cmd overlay enable com.android.internal.systemui.navbar.gestural",
-                    "cmd overlay disable com.android.internal.systemui.navbar.threebutton",
-                    "cmd statusbar restart"
+                    "cmd overlay disable com.android.internal.systemui.navbar.threebutton"
                 )
             }
             execShell(cmds.joinToString(" && ")) { code, out, err ->
-                Log.d(TAG, "toggle exit=$code\nstdout=$out\nstderr=$err")
-                if (code == 0) {
-                    Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
-                }
             }
         }
     }
@@ -317,7 +282,7 @@ class FloatService : Service() {
     /** screencap -p 获取整屏 PNG 字节 */
     private fun captureScreenPng(): ByteArray? {
         if (!isCapturing) return null
-        val proc: java.lang.Process? = try {
+        val proc: Process? = try {
             if (newProcessMethod != null) {
                 @Suppress("UNCHECKED_CAST")
                 newProcessMethod!!.invoke(
@@ -325,7 +290,7 @@ class FloatService : Service() {
                     arrayOf("sh", "-c", "screencap -p"),
                     null,
                     null
-                ) as java.lang.Process
+                ) as Process
             } else {
                 Runtime.getRuntime().exec(arrayOf("sh", "-c", "screencap -p"))
             }
@@ -354,84 +319,127 @@ class FloatService : Service() {
         }
     }
 
-    // 只检测“粉红”（浅红/偏粉），显式排除“饱和大红”
+    // —— 颜色检测：右下粉红（浅红/粉，排除大红）——
     private fun detectPinkAtBottomRight(bmp: Bitmap): Boolean {
         val w = bmp.width
         val h = bmp.height
         if (w <= 0 || h <= 0) return false
-    
-        // 右下角区域（保持你之前的比例常量）
+
         val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
         val ry = (h * (1f - DETECT_REGION_RATIO)).toInt()
         val rw = w - rx
         val rh = h - ry
         if (rw <= 0 || rh <= 0) return false
-    
+
         var hit = 0
         var total = 0
         val hsv = FloatArray(3)
-    
-        // 粉红阈值（可按需要微调）
-        val PINK_HUE_LOW1 = 330f  // 330°..360°（红紫到红）
+
+        val PINK_HUE_LOW1 = 330f
         val PINK_HUE_HIGH1 = 360f
-        val PINK_HUE_LOW2 = 0f    // 0°..10°（靠近红，但更亮更淡）
+        val PINK_HUE_LOW2 = 0f
         val PINK_HUE_HIGH2 = 10f
-        val PINK_SAT_MIN = 0.12f  // 粉的最小饱和度
-        val PINK_SAT_MAX = 0.55f  // 粉与大红分界：排除饱和度更高的“正红”
-        val PINK_VAL_MIN = 0.82f  // 必须很亮
-    
+        val PINK_SAT_MIN = 0.12f
+        val PINK_SAT_MAX = 0.55f
+        val PINK_VAL_MIN = 0.82f
+
         var y = ry
         while (y < h) {
             var x = rx
             while (x < w) {
                 val c = bmp.getPixel(x, y)
-    
-                // HSV 判定
                 Color.colorToHSV(c, hsv)
-                val hue = hsv[0]      // 0..360
-                val sat = hsv[1]      // 0..1
-                val valv = hsv[2]     // 0..1
-    
-                val isHuePinkBand =
-                    ((hue >= PINK_HUE_LOW1 && hue <= PINK_HUE_HIGH1) ||
-                     (hue >= PINK_HUE_LOW2 && hue <= PINK_HUE_HIGH2))
-    
+                val hue = hsv[0]
+                val sat = hsv[1]
+                val valv = hsv[2]
+
+                val isHuePinkBand = ((hue >= PINK_HUE_LOW1 && hue <= PINK_HUE_HIGH1) ||
+                        (hue >= PINK_HUE_LOW2 && hue <= PINK_HUE_HIGH2))
+
                 var isPink = false
                 if (isHuePinkBand && sat in PINK_SAT_MIN..PINK_SAT_MAX && valv >= PINK_VAL_MIN) {
                     isPink = true
                 }
-    
-                // 兜底：排除“纯大红”（RGB 高 R、低 G/B）
+
                 if (isPink) {
                     val r = (c shr 16) and 0xFF
                     val g = (c shr 8) and 0xFF
                     val b = c and 0xFF
-    
-                    // 大红特征：R 很高且 G、B 明显偏低
-                    val looksStrongRed = (r >= 200 && g <= 80 && b <= 80)
-                    // 再给“粉”一个正向特征：亮，且 G/B 不至于太低
-                    val looksPinkish = (r >= 180 && g >= 100 && b >= 120)
-    
-                    if (looksStrongRed || !looksPinkish) {
-                        isPink = false
-                    }
+                    val looksStrongRed = (r >= 200 && g <= 80 && b <= 80) // 大红，排除
+                    val looksPinkish = (r >= 180 && g >= 100 && b >= 120) // 粉感
+                    if (looksStrongRed || !looksPinkish) isPink = false
                 }
-    
+
                 if (isPink) hit++
                 total++
                 x += SAMPLE_STEP
             }
             y += SAMPLE_STEP
         }
-    
+
         if (total == 0) return false
         val ratio = hit.toFloat() / total
         val matched = ratio >= DETECT_HIT_RATIO
-        Log.d(TAG, "detect pink: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
+        Log.d(TAG, "detect pink BR: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
         return matched
     }
 
-    // 统一的 shell 执行（Shizuku 优先，失败回退 Runtime）
+    // —— 颜色检测：右上蓝色 —— 
+    private fun detectBlueAtTopRight(bmp: Bitmap): Boolean {
+        val w = bmp.width
+        val h = bmp.height
+        if (w <= 0 || h <= 0) return false
+
+        val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
+        val ry = 0
+        val rw = w - rx
+        val rh = (h * DETECT_REGION_RATIO).toInt()
+        if (rw <= 0 || rh <= 0) return false
+
+        var hit = 0
+        var total = 0
+        val hsv = FloatArray(3)
+
+        val BLUE_H_MIN = 190f
+        val BLUE_H_MAX = 250f
+        val BLUE_S_MIN = 0.35f
+        val BLUE_V_MIN = 0.70f
+
+        val yEnd = ry + rh
+        var y = ry
+        while (y < yEnd) {
+            var x = rx
+            while (x < w) {
+                val c = bmp.getPixel(x, y)
+                Color.colorToHSV(c, hsv)
+                val h1 = hsv[0]
+                val s = hsv[1]
+                val v = hsv[2]
+
+                var isBlue = (h1 in BLUE_H_MIN..BLUE_H_MAX && s >= BLUE_S_MIN && v >= BLUE_V_MIN)
+                if (isBlue) {
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    val blueDominant = b > r + 25 && b > g + 10
+                    if (!blueDominant) isBlue = false
+                }
+
+                if (isBlue) hit++
+                total++
+                x += SAMPLE_STEP
+            }
+            y += SAMPLE_STEP
+        }
+
+        if (total == 0) return false
+        val ratio = hit.toFloat() / total
+        val matched = ratio >= DETECT_HIT_RATIO
+        Log.d(TAG, "detect blue TR: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
+        return matched
+    }
+
+    // Shell 执行（保留/兼容）
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
@@ -476,10 +484,7 @@ class FloatService : Service() {
                 err = t.message ?: t.toString()
                 Log.e(TAG, "execShell error", t)
             }
-            val stdout = out
-            val stderr = err
-            val exit = code
-            main.post { cb(exit, stdout, stderr) }
+            main.post { cb(code, out, err) }
         }
     }
 

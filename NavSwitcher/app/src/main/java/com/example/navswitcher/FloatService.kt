@@ -7,21 +7,18 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
+import android.os.*
 import android.provider.Settings
 import android.util.Log
 import android.view.*
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import kotlin.math.abs
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
+import java.lang.Math.abs
 import java.lang.reflect.Method
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -34,33 +31,40 @@ class FloatService : Service() {
         private const val NOTI_ID = 1001
         private const val TAG = "FloatService"
 
-        // 取屏与检测（可按需微调）
-        private const val CAPTURE_INTERVAL_MS = 100L
-        private const val DETECT_REGION_RATIO = 0.22f
-        private const val DETECT_HIT_RATIO = 0.035f   // 命中像素比例阈值（越小越敏感）
-        private const val COOLDOWN_MS = 2500L
-        private const val SAMPLE_STEP = 2
+        // 外部控制 Action/Extra（MainActivity 会用到）
+        const val ACTION_SET_INTERVAL = "com.example.navswitcher.SET_INTERVAL"
+        const val ACTION_HIDE_BALL   = "com.example.navswitcher.HIDE_BALL"
+        const val ACTION_SHOW_BALL   = "com.example.navswitcher.SHOW_BALL"
+        const val EXTRA_INTERVAL_MS  = "interval_ms"
 
-        // 悬浮按钮交互
-        private const val CLICK_COOLDOWN_MS = 600L    // 连点冷却
-        private const val BALL_SIZE_DP = 50           // 按钮直径 dp
+        // 取屏与检测参数（可通过 ACTION_SET_INTERVAL 动态改频率）
+        private const val DEFAULT_CAPTURE_INTERVAL_MS = 800L
+        private const val DETECT_REGION_RATIO = 0.22f   // 右下角 22% × 22%
+        private const val DETECT_HIT_RATIO = 0.06f      // 命中像素比例阈值 6%
+        private const val SAMPLE_STEP = 3               // 采样步长
+        private const val AUTO_COOLDOWN_MS = 2500L      // 自动切换冷却
+        private const val CLICK_COOLDOWN_MS = 350L      // 点击防抖
     }
 
+    // 主/IO 线程
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
     private var captureExec: ScheduledExecutorService? = null
 
+    // 悬浮按钮相关
     private var wm: WindowManager? = null
     private var params: WindowManager.LayoutParams? = null
     private var ball: FrameLayout? = null
+    private var touchSlop: Int = 12
     private var lastRawX = 0f
     private var lastRawY = 0f
     private var isDragging = false
-    private var touchSlop = 8  // 运行时初始化
+    private var lastClickTs = 0L
 
+    // 识别状态
     @Volatile private var isCapturing = false
     @Volatile private var lastTriggerTs = 0L
-    @Volatile private var lastClickTs = 0L
+    private var captureIntervalMs: Long = DEFAULT_CAPTURE_INTERVAL_MS
 
     // 反射拿 Shizuku.newProcess(String[], String[], String)
     private val newProcessMethod: Method? by lazy {
@@ -88,7 +92,6 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         try {
             startForegroundX()
             addBallX()
@@ -99,6 +102,29 @@ class FloatService : Service() {
             Toast.makeText(this, "悬浮球启动失败: ${t.message}", Toast.LENGTH_LONG).show()
             stopSelf()
         }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_SET_INTERVAL -> {
+                val ms = intent.getLongExtra(EXTRA_INTERVAL_MS, captureIntervalMs)
+                captureIntervalMs = ms.coerceIn(50L, 5000L)
+                if (isCapturing) {
+                    stopCaptureLoop()
+                    startCaptureLoop()
+                }
+                Toast.makeText(this, "截图频率已设为 ${captureIntervalMs}ms", Toast.LENGTH_SHORT).show()
+            }
+            ACTION_HIDE_BALL -> {
+                ball?.visibility = View.GONE
+                Toast.makeText(this, "已隐藏悬浮球", Toast.LENGTH_SHORT).show()
+            }
+            ACTION_SHOW_BALL -> {
+                ball?.visibility = View.VISIBLE
+                Toast.makeText(this, "已显示悬浮球", Toast.LENGTH_SHORT).show()
+            }
+        }
+        return START_STICKY
     }
 
     private fun startForegroundX() {
@@ -120,19 +146,17 @@ class FloatService : Service() {
             throw IllegalStateException("未授予悬浮窗权限")
         }
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        touchSlop = ViewConfiguration.get(this).scaledTouchSlop
 
         val type = if (Build.VERSION.SDK_INT >= 26)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        // 关键：悬浮窗本身用固定像素，不要 WRAP_CONTENT
-        val sizePx = (BALL_SIZE_DP * resources.displayMetrics.density).toInt()
-        val strokePx = (2 * resources.displayMetrics.density).toInt()
-
+        val sizePx = (56 * resources.displayMetrics.density).toInt() // ≈56dp 的大圆
         params = WindowManager.LayoutParams(
-            sizePx, // 宽
-            sizePx, // 高
+            sizePx,
+            sizePx,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -140,11 +164,11 @@ class FloatService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.START or Gravity.TOP
-            x = 160
-            y = 480
+            x = 180
+            y = 520
         }
 
-        // 纯圆形灰色按钮，整个圆即点击区域（用 FrameLayout 做容器）
+        // 纯圆形灰色按钮，整个圆即点击区域
         ball = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -152,8 +176,7 @@ class FloatService : Service() {
             )
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#CC808080"))          // 实心灰（约 80% 不透明）
-                setStroke(strokePx, Color.parseColor("#66FFFFFF"))// 淡白描边
+                setColor(Color.parseColor("#808A8A8A")) // 半透明灰
             }
             isClickable = true
             isFocusable = false
@@ -167,12 +190,12 @@ class FloatService : Service() {
                         return@setOnTouchListener true
                     }
                     MotionEvent.ACTION_MOVE -> {
+                        val dx = (ev.rawX - lastRawX).toInt()
+                        val dy = (ev.rawY - lastRawY).toInt()
+                        if (!isDragging && (dx * dx + dy * dy) > touchSlop * touchSlop) {
+                            isDragging = true
+                        }
                         params?.let { p ->
-                            val dx = (ev.rawX - lastRawX).toInt()
-                            val dy = (ev.rawY - lastRawY).toInt()
-                            if (!isDragging && (dx * dx + dy * dy) > touchSlop * touchSlop) {
-                                isDragging = true
-                            }
                             p.x += dx
                             p.y += dy
                             wm?.updateViewLayout(v, p)
@@ -199,12 +222,6 @@ class FloatService : Service() {
         wm?.addView(ball, params)
     }
 
-    private fun setBallActive(active: Boolean) {
-        (ball?.background as? GradientDrawable)?.setColor(
-            Color.parseColor(if (active) "#CC96C8FF" else "#CC808080") // 激活淡蓝/未激活灰
-        )
-    }
-
     // 点击：开始/停止取屏识别
     private fun onBallClickedToggleCapture() {
         if (!Shizuku.pingBinder()) {
@@ -227,6 +244,12 @@ class FloatService : Service() {
         }
     }
 
+    private fun setBallActive(active: Boolean) {
+        (ball?.background as? GradientDrawable)?.setColor(
+            Color.parseColor(if (active) "#8096C8FF" else "#808A8A8A") // 激活淡蓝，未激活灰
+        )
+    }
+
     private fun startCaptureLoop() {
         if (captureExec != null) return
         captureExec = Executors.newSingleThreadScheduledExecutor()
@@ -238,7 +261,7 @@ class FloatService : Service() {
                 bmp.recycle()
                 if (hit) {
                     val now = SystemClock.uptimeMillis()
-                    if (now - lastTriggerTs >= COOLDOWN_MS) {
+                    if (now - lastTriggerTs >= AUTO_COOLDOWN_MS) {
                         lastTriggerTs = now
                         main.post { doToggleOnce() }
                     }
@@ -246,7 +269,7 @@ class FloatService : Service() {
             } catch (t: Throwable) {
                 Log.e(TAG, "capture/detect error", t)
             }
-        }, 0, CAPTURE_INTERVAL_MS, TimeUnit.MILLISECONDS)
+        }, 0, captureIntervalMs, TimeUnit.MILLISECONDS)
     }
 
     private fun stopCaptureLoop() {
@@ -294,8 +317,7 @@ class FloatService : Service() {
     /** screencap -p 获取整屏 PNG 字节 */
     private fun captureScreenPng(): ByteArray? {
         if (!isCapturing) return null
-
-        val jproc: java.lang.Process? = try {
+        val proc: java.lang.Process? = try {
             if (newProcessMethod != null) {
                 @Suppress("UNCHECKED_CAST")
                 newProcessMethod!!.invoke(
@@ -311,43 +333,40 @@ class FloatService : Service() {
             Log.e(TAG, "screencap spawn error", t)
             null
         }
-        jproc ?: return null
+        proc ?: return null
 
         return try {
             val out = ByteArrayOutputStream(2 * 1024 * 1024)
             val buf = ByteArray(32 * 1024)
-
-            jproc.inputStream.use { ins ->
-                while (true) {
-                    val n = ins.read(buf)
-                    if (n <= 0) break
-                    out.write(buf, 0, n)
-                }
+            val ins = proc.inputStream
+            while (true) {
+                val n = ins.read(buf)
+                if (n <= 0) break
+                out.write(buf, 0, n)
             }
-            try { jproc.waitFor(1500, TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
+            try { proc.waitFor(1500, TimeUnit.MILLISECONDS) } catch (_: Throwable) {}
             out.toByteArray()
         } catch (t: Throwable) {
             Log.e(TAG, "screencap read error", t)
             null
         } finally {
-            try { jproc.destroy() } catch (_: Throwable) {}
+            try { proc.destroy() } catch (_: Throwable) {}
         }
     }
 
-    /** 只匹配“浅红”，排除“大红” */
+    /** 在右下角区域检测“浅红色按钮” —— 大红色排除，浅红色命中 */
     private fun detectLightRedAtBottomRight(bmp: Bitmap): Boolean {
         val w = bmp.width
         val h = bmp.height
         if (w <= 0 || h <= 0) return false
 
-        // 只取右下角区域
+        // 只取右下角一个子区域
         val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
         val ry = (h * (1f - DETECT_REGION_RATIO)).toInt()
-        if (w - rx <= 0 || h - ry <= 0) return false
+        val hsv = FloatArray(3)
 
         var hit = 0
         var total = 0
-        val hsv = FloatArray(3)
 
         var y = ry
         while (y < h) {
@@ -355,18 +374,21 @@ class FloatService : Service() {
             while (x < w) {
                 val c = bmp.getPixel(x, y)
                 Color.colorToHSV(c, hsv)
-                val hue = hsv[0]    // 0..360
-                val sat = hsv[1]    // 0..1
-                val valv = hsv[2]   // 0..1
+                val hue = hsv[0]       // 0..360
+                val sat = hsv[1]       // 0..1
+                val valv = hsv[2]      // 0..1
 
-                val isRedHue = (hue <= 20f || hue >= 340f)
-                // 浅红：很亮 + 中低饱和
-                val isLightRed = isRedHue && valv >= 0.88f && sat in 0.18f..0.55f
-                // 大红（排除）：高饱和或偏暗
-                val isDeepRed = isRedHue && (sat >= 0.60f || valv <= 0.80f)
+                val redHue = (hue <= 20f || hue >= 340f)
+                val isLight = valv >= 0.78f
+                val isSaturated = sat >= 0.35f
 
-                if (isLightRed && !isDeepRed) hit++
+                // 排除“深红（很暗/很饱和）”
+                val isDarkRed = valv <= 0.55f
+                val isVerySaturated = sat >= 0.80f
 
+                if (redHue && isLight && isSaturated && !isDarkRed && !isVerySaturated) {
+                    hit++
+                }
                 total++
                 x += SAMPLE_STEP
             }
@@ -380,7 +402,7 @@ class FloatService : Service() {
         return matched
     }
 
-    // Shell 执行
+    // 统一的 shell 执行（Shizuku 优先，失败回退 Runtime）
     private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
         io.execute {
             var code = -1
@@ -402,7 +424,6 @@ class FloatService : Service() {
 
                 val sbOut = StringBuilder()
                 val sbErr = StringBuilder()
-
                 BufferedReader(InputStreamReader(jproc.inputStream)).use { r ->
                     var line: String?
                     while (true) {
@@ -426,7 +447,10 @@ class FloatService : Service() {
                 err = t.message ?: t.toString()
                 Log.e(TAG, "execShell error", t)
             }
-            main.post { cb(code, out, err) }
+            val stdout = out
+            val stderr = err
+            val exit = code
+            main.post { cb(exit, stdout, stderr) }
         }
     }
 

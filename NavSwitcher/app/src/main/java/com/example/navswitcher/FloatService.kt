@@ -35,7 +35,7 @@ class FloatService : Service() {
         private const val TAG = "FloatService"
 
         // 取屏与检测（可按需微调）
-        private const val CAPTURE_INTERVAL_MS = 700L
+        private const val CAPTURE_INTERVAL_MS = 100L
         private const val DETECT_REGION_RATIO = 0.22f
         private const val DETECT_HIT_RATIO = 0.035f   // 命中像素比例阈值（越小越敏感）
         private const val COOLDOWN_MS = 2500L
@@ -43,7 +43,7 @@ class FloatService : Service() {
 
         // 悬浮按钮交互
         private const val CLICK_COOLDOWN_MS = 600L    // 连点冷却
-        private const val BALL_SIZE_DP = 80           // 按钮直径 dp
+        private const val BALL_SIZE_DP = 50           // 按钮直径 dp
     }
 
     private val main = Handler(Looper.getMainLooper())

@@ -257,7 +257,7 @@ class FloatService : Service() {
             try {
                 val png = captureScreenPng() ?: return@scheduleAtFixedRate
                 val bmp = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return@scheduleAtFixedRate
-                val hit = detectLightRedAtBottomRight(bmp)
+                val hit = detectPinkAtBottomRight(bmp)
                 bmp.recycle()
                 if (hit) {
                     val now = SystemClock.uptimeMillis()
@@ -354,51 +354,80 @@ class FloatService : Service() {
         }
     }
 
-    /** 在右下角区域检测“浅红色按钮” —— 大红色排除，浅红色命中 */
-    private fun detectLightRedAtBottomRight(bmp: Bitmap): Boolean {
+    // 只检测“粉红”（浅红/偏粉），显式排除“饱和大红”
+    private fun detectPinkAtBottomRight(bmp: Bitmap): Boolean {
         val w = bmp.width
         val h = bmp.height
         if (w <= 0 || h <= 0) return false
-
-        // 只取右下角一个子区域
+    
+        // 右下角区域（保持你之前的比例常量）
         val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
         val ry = (h * (1f - DETECT_REGION_RATIO)).toInt()
-        val hsv = FloatArray(3)
-
+        val rw = w - rx
+        val rh = h - ry
+        if (rw <= 0 || rh <= 0) return false
+    
         var hit = 0
         var total = 0
-
+        val hsv = FloatArray(3)
+    
+        // 粉红阈值（可按需要微调）
+        val PINK_HUE_LOW1 = 330f  // 330°..360°（红紫到红）
+        val PINK_HUE_HIGH1 = 360f
+        val PINK_HUE_LOW2 = 0f    // 0°..10°（靠近红，但更亮更淡）
+        val PINK_HUE_HIGH2 = 10f
+        val PINK_SAT_MIN = 0.12f  // 粉的最小饱和度
+        val PINK_SAT_MAX = 0.55f  // 粉与大红分界：排除饱和度更高的“正红”
+        val PINK_VAL_MIN = 0.82f  // 必须很亮
+    
         var y = ry
         while (y < h) {
             var x = rx
             while (x < w) {
                 val c = bmp.getPixel(x, y)
+    
+                // HSV 判定
                 Color.colorToHSV(c, hsv)
-                val hue = hsv[0]       // 0..360
-                val sat = hsv[1]       // 0..1
-                val valv = hsv[2]      // 0..1
-
-                val redHue = (hue <= 20f || hue >= 340f)
-                val isLight = valv >= 0.78f
-                val isSaturated = sat >= 0.35f
-
-                // 排除“深红（很暗/很饱和）”
-                val isDarkRed = valv <= 0.55f
-                val isVerySaturated = sat >= 0.80f
-
-                if (redHue && isLight && isSaturated && !isDarkRed && !isVerySaturated) {
-                    hit++
+                val hue = hsv[0]      // 0..360
+                val sat = hsv[1]      // 0..1
+                val valv = hsv[2]     // 0..1
+    
+                val isHuePinkBand =
+                    ((hue >= PINK_HUE_LOW1 && hue <= PINK_HUE_HIGH1) ||
+                     (hue >= PINK_HUE_LOW2 && hue <= PINK_HUE_HIGH2))
+    
+                var isPink = false
+                if (isHuePinkBand && sat in PINK_SAT_MIN..PINK_SAT_MAX && valv >= PINK_VAL_MIN) {
+                    isPink = true
                 }
+    
+                // 兜底：排除“纯大红”（RGB 高 R、低 G/B）
+                if (isPink) {
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+    
+                    // 大红特征：R 很高且 G、B 明显偏低
+                    val looksStrongRed = (r >= 200 && g <= 80 && b <= 80)
+                    // 再给“粉”一个正向特征：亮，且 G/B 不至于太低
+                    val looksPinkish = (r >= 180 && g >= 100 && b >= 120)
+    
+                    if (looksStrongRed || !looksPinkish) {
+                        isPink = false
+                    }
+                }
+    
+                if (isPink) hit++
                 total++
                 x += SAMPLE_STEP
             }
             y += SAMPLE_STEP
         }
-
+    
         if (total == 0) return false
         val ratio = hit.toFloat() / total
         val matched = ratio >= DETECT_HIT_RATIO
-        Log.d(TAG, "detect light-red: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
+        Log.d(TAG, "detect pink: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
         return matched
     }
 

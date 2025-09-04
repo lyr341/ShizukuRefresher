@@ -7,7 +7,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.Toast
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.ActivityResultLauncher
@@ -38,21 +40,78 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 按钮：开启/重启悬浮球
-        val btn = Button(this).apply {
-            text = "开启悬浮球"
-            setOnClickListener { ensureAndStart() }
+        // 简单的纵向布局
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         }
-        setContentView(btn)
 
-        // 显式初始化监听器（注意：这里不会自我递归）
+        fun makeBtn(textStr: String, onClick: () -> Unit) = Button(this).apply {
+            text = textStr
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = (12 * resources.displayMetrics.density).toInt()
+            layoutParams = lp
+            setOnClickListener { onClick() }
+        }
+
+        // 1) 开启/重启悬浮球
+        root.addView(makeBtn("开启悬浮球") {
+            ensureAndStart()
+        })
+
+        // 2) 截图频率 100ms
+        root.addView(makeBtn("截图频率 100ms") {
+            ensureAndStart()
+            sendSetInterval(100L)
+        })
+
+        // 3) 截图频率 200ms
+        root.addView(makeBtn("截图频率 200ms") {
+            ensureAndStart()
+            sendSetInterval(200L)
+        })
+
+        // 4) 截图频率 300ms
+        root.addView(makeBtn("截图频率 300ms") {
+            ensureAndStart()
+            sendSetInterval(300L)
+        })
+
+        // 5) 隐藏悬浮球
+        root.addView(makeBtn("隐藏悬浮球") {
+            ensureAndStart()
+            val it = Intent(this, FloatService::class.java).apply {
+                action = FloatService.ACTION_HIDE_BALL
+            }
+            startServiceCompat(it)
+        })
+
+        // 6) 显示悬浮球
+        root.addView(makeBtn("显示悬浮球") {
+            ensureAndStart()
+            val it = Intent(this, FloatService::class.java).apply {
+                action = FloatService.ACTION_SHOW_BALL
+            }
+            startServiceCompat(it)
+        })
+
+        setContentView(root)
+
+        // 显式初始化监听器
         shizukuPermListener = Shizuku.OnRequestPermissionResultListener { _: Int, grantResult: Int ->
             if (grantResult == PackageManager.PERMISSION_GRANTED) {
-                startFloatService()
+                startFloatService() // 权限到手后拉起服务
             } else {
                 Toast.makeText(this, "未授予 Shizuku 权限", Toast.LENGTH_LONG).show()
             }
-            // 用完移除监听
             Shizuku.removeRequestPermissionResultListener(shizukuPermListener)
         }
 
@@ -92,10 +151,27 @@ class MainActivity : AppCompatActivity() {
     private fun startFloatService() {
         try {
             val it = Intent(this, FloatService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) startForegroundService(it) else startService(it)
+            startServiceCompat(it)
             Toast.makeText(this, "已请求启动悬浮球服务", Toast.LENGTH_SHORT).show()
         } catch (t: Throwable) {
             Toast.makeText(this, "启动服务异常: ${t.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun sendSetInterval(ms: Long) {
+        val it = Intent(this, FloatService::class.java).apply {
+            action = FloatService.ACTION_SET_INTERVAL
+            putExtra(FloatService.EXTRA_INTERVAL_MS, ms)
+        }
+        startServiceCompat(it)
+        Toast.makeText(this, "已设置截图频率为 ${ms}ms", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startServiceCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
     }
 }

@@ -49,6 +49,7 @@ class FloatService : Service() {
         const val ACTION_SET_INTERVAL = "com.example.navswitcher.action.SET_INTERVAL"
         const val EXTRA_INTERVAL_MS = "interval_ms"
     }
+    
 
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()

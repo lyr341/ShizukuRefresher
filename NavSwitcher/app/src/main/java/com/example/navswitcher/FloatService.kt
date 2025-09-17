@@ -37,13 +37,16 @@ class FloatService : Service() {
         const val ACTION_SHOW_BALL   = "com.example.navswitcher.SHOW_BALL"
         const val EXTRA_INTERVAL_MS  = "interval_ms"
 
-        // 取屏与检测参数（可通过 ACTION_SET_INTERVAL 动态改频率）
+        // 取屏与检测参数
         private const val DEFAULT_CAPTURE_INTERVAL_MS = 800L
         private const val DETECT_REGION_RATIO = 0.22f   // 右下角 22% × 22%
         private const val DETECT_HIT_RATIO = 0.06f      // 命中像素比例阈值 6%
         private const val SAMPLE_STEP = 3               // 采样步长
         private const val AUTO_COOLDOWN_MS = 2500L      // 自动切换冷却
         private const val CLICK_COOLDOWN_MS = 350L      // 点击防抖
+
+        // ★ 要翻转的一条“无害 overlay”（图标/字体/形状类，视觉基本无感）
+        const val OVERLAY_PKG = "com.android.theme.font.notoserifsource"
     }
 
     // 主/IO 线程
@@ -277,39 +280,43 @@ class FloatService : Service() {
         captureExec = null
     }
 
-    /** 执行一次“手势/三键”切换 */
+    /** 执行一次“overlay 翻转（单边变化，只刷新一次）” */
     private fun doToggleOnce() {
-        Toast.makeText(this, "检测到浅红按钮，正在切换…", Toast.LENGTH_SHORT).show()
-        isThreeButtonEnabled { isThree ->
-            val cmds = if (!isThree) {
-                listOf(
-                    "cmd overlay enable com.android.internal.systemui.navbar.threebutton",
-                    "cmd overlay disable com.android.internal.systemui.navbar.gestural",
-                    "cmd statusbar restart"
-                )
+        Toast.makeText(this, "检测到浅红按钮，刷新中…", Toast.LENGTH_SHORT).show()
+
+        isOverlayEnabled(OVERLAY_PKG) { enabled ->
+            // 只做一次变化：启用或禁用（二选一），不追加第二步，也不重启 statusbar
+            val cmd = if (enabled) {
+                "cmd overlay disable --user 0 $OVERLAY_PKG"
             } else {
-                listOf(
-                    "cmd overlay enable com.android.internal.systemui.navbar.gestural",
-                    "cmd overlay disable com.android.internal.systemui.navbar.threebutton",
-                    "cmd statusbar restart"
-                )
+                "cmd overlay enable --user 0 $OVERLAY_PKG"
             }
-            execShell(cmds.joinToString(" && ")) { code, out, err ->
-                Log.d(TAG, "toggle exit=$code\nstdout=$out\nstderr=$err")
+            execShell(cmd) { code, out, err ->
+                Log.d(TAG, "overlay flip exit=$code\nstdout=$out\nstderr=$err")
                 if (code == 0) {
-                    Toast.makeText(this, "切换完成", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "已触发一次刷新", Toast.LENGTH_SHORT).show()
+                    // 如极个别 ROM 偶发不触发，可取消注释下一行做一次显式广播（通常不需要）：
+                    // execShell("am broadcast -a android.intent.action.CONFIGURATION_CHANGED") {_,_,_->}
                 } else {
-                    Toast.makeText(this, "切换失败($code)", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "刷新失败($code)：$err", Toast.LENGTH_LONG).show()
                 }
             }
         }
     }
 
-    private fun isThreeButtonEnabled(cb: (Boolean) -> Unit) {
-        val cmd = "cmd overlay list | grep '\\[x\\] com.android.internal.systemui.navbar.threebutton' | wc -l"
-        execShell(cmd) { code, out, _ ->
-            val enabled = (code == 0) && (out.trim().toIntOrNull() ?: 0) > 0
-            Log.d(TAG, "threebutton enabled? $enabled, raw=$out, code=$code")
+    /** 读取 overlay 列表并判断某个 overlay 是否启用（不依赖 grep/wc） */
+    private fun isOverlayEnabled(pkg: String, cb: (Boolean) -> Unit) {
+        execShell("cmd overlay list") { code, out, err ->
+            if (code != 0) {
+                Log.w(TAG, "overlay list failed: code=$code, err=$err")
+                cb(false)
+                return@execShell
+            }
+            val enabled = out
+                .lineSequence()
+                .map { it.trim() }
+                .any { it.startsWith("[x]") && it.endsWith(pkg) }
+            Log.d(TAG, "isOverlayEnabled($pkg) = $enabled")
             cb(enabled)
         }
     }
@@ -349,147 +356,4 @@ class FloatService : Service() {
         } catch (t: Throwable) {
             Log.e(TAG, "screencap read error", t)
             null
-        } finally {
-            try { proc.destroy() } catch (_: Throwable) {}
-        }
-    }
-
-    // 只检测“粉红”（浅红/偏粉），显式排除“饱和大红”
-    private fun detectPinkAtBottomRight(bmp: Bitmap): Boolean {
-        val w = bmp.width
-        val h = bmp.height
-        if (w <= 0 || h <= 0) return false
-    
-        // 右下角区域（保持你之前的比例常量）
-        val rx = (w * (1f - DETECT_REGION_RATIO)).toInt()
-        val ry = (h * (1f - DETECT_REGION_RATIO)).toInt()
-        val rw = w - rx
-        val rh = h - ry
-        if (rw <= 0 || rh <= 0) return false
-    
-        var hit = 0
-        var total = 0
-        val hsv = FloatArray(3)
-    
-        // 粉红阈值（可按需要微调）
-        val PINK_HUE_LOW1 = 330f  // 330°..360°（红紫到红）
-        val PINK_HUE_HIGH1 = 360f
-        val PINK_HUE_LOW2 = 0f    // 0°..10°（靠近红，但更亮更淡）
-        val PINK_HUE_HIGH2 = 10f
-        val PINK_SAT_MIN = 0.12f  // 粉的最小饱和度
-        val PINK_SAT_MAX = 0.55f  // 粉与大红分界：排除饱和度更高的“正红”
-        val PINK_VAL_MIN = 0.82f  // 必须很亮
-    
-        var y = ry
-        while (y < h) {
-            var x = rx
-            while (x < w) {
-                val c = bmp.getPixel(x, y)
-    
-                // HSV 判定
-                Color.colorToHSV(c, hsv)
-                val hue = hsv[0]      // 0..360
-                val sat = hsv[1]      // 0..1
-                val valv = hsv[2]     // 0..1
-    
-                val isHuePinkBand =
-                    ((hue >= PINK_HUE_LOW1 && hue <= PINK_HUE_HIGH1) ||
-                     (hue >= PINK_HUE_LOW2 && hue <= PINK_HUE_HIGH2))
-    
-                var isPink = false
-                if (isHuePinkBand && sat in PINK_SAT_MIN..PINK_SAT_MAX && valv >= PINK_VAL_MIN) {
-                    isPink = true
-                }
-    
-                // 兜底：排除“纯大红”（RGB 高 R、低 G/B）
-                if (isPink) {
-                    val r = (c shr 16) and 0xFF
-                    val g = (c shr 8) and 0xFF
-                    val b = c and 0xFF
-    
-                    // 大红特征：R 很高且 G、B 明显偏低
-                    val looksStrongRed = (r >= 200 && g <= 80 && b <= 80)
-                    // 再给“粉”一个正向特征：亮，且 G/B 不至于太低
-                    val looksPinkish = (r >= 180 && g >= 100 && b >= 120)
-    
-                    if (looksStrongRed || !looksPinkish) {
-                        isPink = false
-                    }
-                }
-    
-                if (isPink) hit++
-                total++
-                x += SAMPLE_STEP
-            }
-            y += SAMPLE_STEP
-        }
-    
-        if (total == 0) return false
-        val ratio = hit.toFloat() / total
-        val matched = ratio >= DETECT_HIT_RATIO
-        Log.d(TAG, "detect pink: hit=$hit total=$total ratio=${"%.3f".format(ratio)} matched=$matched")
-        return matched
-    }
-
-    // 统一的 shell 执行（Shizuku 优先，失败回退 Runtime）
-    private fun execShell(cmd: String, cb: (code: Int, stdout: String, stderr: String) -> Unit) {
-        io.execute {
-            var code = -1
-            var out = ""
-            var err = ""
-            try {
-                val jproc: java.lang.Process =
-                    if (newProcessMethod != null) {
-                        @Suppress("UNCHECKED_CAST")
-                        newProcessMethod!!.invoke(
-                            null,
-                            arrayOf("sh", "-c", cmd),
-                            null,
-                            null
-                        ) as java.lang.Process
-                    } else {
-                        Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-                    }
-
-                val sbOut = StringBuilder()
-                val sbErr = StringBuilder()
-                BufferedReader(InputStreamReader(jproc.inputStream)).use { r ->
-                    var line: String?
-                    while (true) {
-                        line = r.readLine() ?: break
-                        sbOut.appendLine(line)
-                    }
-                }
-                BufferedReader(InputStreamReader(jproc.errorStream)).use { r ->
-                    var line: String?
-                    while (true) {
-                        line = r.readLine() ?: break
-                        sbErr.appendLine(line)
-                    }
-                }
-
-                jproc.waitFor()
-                code = jproc.exitValue()
-                out = sbOut.toString()
-                err = sbErr.toString()
-            } catch (t: Throwable) {
-                err = t.message ?: t.toString()
-                Log.e(TAG, "execShell error", t)
-            }
-            val stdout = out
-            val stderr = err
-            val exit = code
-            main.post { cb(exit, stdout, stderr) }
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try { wm?.removeView(ball) } catch (_: Throwable) {}
-        wm = null; ball = null; params = null
-        stopCaptureLoop()
-        io.shutdownNow()
-    }
-
-    override fun onBind(intent: Intent?) = null
-}
+        } fina
